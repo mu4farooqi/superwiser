@@ -377,7 +377,11 @@ def test_p0_7_conflict_display():
 # =============================================================================
 
 def test_p1_1_conflict_resolution():
-    """P1.1: Test that conflicts can be resolved via extraction."""
+    """P1.1: Test that conflict resolution handler works correctly."""
+    # Import the handler directly
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    from worker import handle_resolution, generate_id
+
     db = get_db()
     try:
         # Get the existing conflict from P0.6
@@ -391,10 +395,6 @@ def test_p1_1_conflict_resolution():
 
         context_id = conflict[0]
 
-        # Reset conflict to shown=TRUE (user has seen it)
-        db.execute("UPDATE pending_conflicts SET shown = TRUE WHERE context_id = ?", [context_id])
-        db.commit()
-
         # Count rules before resolution
         rules_before = db.execute(
             "SELECT COUNT(*) FROM rules WHERE context_id = ?", [context_id]
@@ -402,50 +402,50 @@ def test_p1_1_conflict_resolution():
 
         log_info(f"Resolving conflict [{context_id}] with {rules_before} rules...")
 
-        # Insert resolution prompt - user picks option 1
-        prompt = f"For the conflict [{context_id}], use option 1 - wrap database calls in try-catch"
-        db.execute("""
-            INSERT INTO queue (transcript_path, position, human_input, session_id, status)
-            VALUES ('', 0, ?, 'test_session', 'pending')
-        """, [prompt])
+        # Simulate what extraction would output for resolution
+        resolution_result = {
+            "resolve": context_id,
+            "new_rules": [{
+                "rule": "Wrap database calls in try-catch for consistent error handling",
+                "tags": ["error-handling", "database"]
+            }]
+        }
+
+        # Item metadata (not important for resolution)
+        item = {"human_input": "test resolution", "session_id": "test"}
+
+        # Call handler directly
+        status, reason = handle_resolution(db, resolution_result, item, vec_loaded=False)
         db.commit()
 
-        queue_id = db.execute(
-            "SELECT id FROM queue WHERE human_input LIKE ?",
-            [f'%{context_id}%']
-        ).fetchone()[0]
-
-        log_info(f"Waiting for resolution (queue {queue_id})...")
-        final_status = wait_for_worker(db, queue_id, timeout=90)
-
-        if final_status not in ('completed', 'skipped'):
-            log_fail("P1.1 Conflict Resolution", f"Queue status: {final_status}")
+        if status != "completed":
+            log_fail("P1.1 Conflict Resolution", f"Handler returned: {status}, {reason}")
             return False
 
         # Verify conflict was resolved
-        conflict_still_exists = db.execute(
+        conflict_exists = db.execute(
             "SELECT 1 FROM pending_conflicts WHERE context_id = ?", [context_id]
         ).fetchone()
 
-        if not conflict_still_exists:
+        old_rules = db.execute(
+            "SELECT 1 FROM rules WHERE context_id = ?", [context_id]
+        ).fetchone()
+
+        if conflict_exists or old_rules:
+            log_fail("P1.1 Conflict Resolution", "Old conflict/rules still exist")
+            return False
+
+        # Verify new rule was created
+        new_rules = db.execute(
+            "SELECT rule FROM rules WHERE rule LIKE '%try-catch for consistent%'"
+        ).fetchone()
+
+        if new_rules:
             log_pass("P1.1 Conflict Resolution")
-            log_info(f"  Conflict [{context_id}] was resolved and removed")
-            return True
-        elif final_status == 'completed':
-            # Completed but conflict still exists - resolution created new rule
-            log_pass("P1.1 Conflict Resolution")
-            log_info("  Resolution processed, new guidance added")
-            return True
-        elif final_status == 'skipped':
-            # Skipped - extraction model didn't recognize as resolution
-            # This can happen if the prompt isn't clear enough
-            # For integration test, we verify the resolution PATH works by checking
-            # that the prompt was at least processed
-            log_pass("P1.1 Conflict Resolution")
-            log_info("  Resolution prompt processed (skipped - may need clearer wording)")
+            log_info(f"  Conflict [{context_id}] resolved, new rule created")
             return True
         else:
-            log_fail("P1.1 Conflict Resolution", f"Unexpected state: status={final_status}")
+            log_fail("P1.1 Conflict Resolution", "New rule not found")
             return False
     finally:
         db.close()
