@@ -1,20 +1,67 @@
 # Superwiser
 
-Superwiser captures your coding preferences and corrections from Claude Code sessions. It builds a searchable knowledge base that Claude can reference in future sessions.
+Superwiser captures your coding preferences and corrections from Claude Code sessions. It stores them in a searchable database that Claude can reference in future sessions.
+
+## Why Superwiser?
+
+AI already knows how to code. It can architect systems, write tests, and follow best practices. The remaining gap is your steering—the corrections and preferences that make the output match what you actually want.
+
+Superwiser records that steering. Not another memory layer.
+
+### Not a Typical Memory Layer
+
+Most memory plugins store everything: conversation history, file contents, tool outputs. This burns tokens and often duplicates what the AI already handles.
+
+Superwiser is different:
+
+- **Only human prompts** are analyzed, not entire conversations
+- **Sonnet extracts rules** in the background (fast, cheap)
+- **Conflicts are detected** when you give contradictory guidance across sessions
+- **Local storage** per project, no external services
+
+### What We Track vs. Ignore
+
+| Tracked | Ignored |
+|---------|---------|
+| "Use PostgreSQL for user data" | Claude reading files |
+| "Split this into smaller functions" | Tool calls and outputs |
+| "Always add tests for new features" | Claude's responses |
+| Your correction after Claude's mistake | File edits and diffs |
+
+### Lightweight
+
+- **Extraction**: Sonnet processes prompts in background (fast, cheap)
+- **Storage**: Local SQLite per project
+- **Processing**: Background worker, never blocks your session
+- **Tokens**: Only your prompts analyzed, not entire conversations
+
+### CLAUDE.md vs Superwiser
+
+Simple, static rules belong in your [CLAUDE.md](https://docs.anthropic.com/en/docs/claude-code/memory) file:
+- "Use TypeScript"
+- "Run prettier before committing"
+
+Superwiser captures what emerges during sessions—contextual corrections with the reasoning behind them. These are harder to anticipate and write upfront.
 
 ## What It Captures
 
-Only human prompts are analyzed. Claude's responses, tool calls, and file operations are ignored.
-
-**Preferences** - Direct statements about how you want things done:
-- "Always use TypeScript, never plain JavaScript"
-- "Format dates as ISO 8601"
-- "Keep functions under 50 lines"
-
 **Corrections** - When you redirect Claude after seeing its output:
-- Claude sets up MongoDB → "Use PostgreSQL—we need foreign key constraints"
-- Claude wraps every fetch in try/catch → "Let errors propagate"
-- Claude creates a 200-line utility → "Split this into smaller functions"
+
+> Claude creates an auth system with JWT stored in localStorage.
+>
+> *"Don't store tokens in localStorage—use httpOnly cookies. We had XSS issues before and this is a security requirement from the last audit."*
+
+> Claude adds a try/catch around every database call, returning null on failure.
+>
+> *"Let database errors propagate. Swallowing them makes debugging impossible. Only catch at the API boundary where we can return proper error responses."*
+
+> Claude builds a 300-line React component with inline state management.
+>
+> *"This needs to be split up. Extract the form validation into a custom hook, move the API calls to a separate service, and keep the component focused on rendering."*
+
+> Claude sets up a new endpoint by copying an existing one and modifying it.
+>
+> *"Use the base controller class instead of copying. We have shared middleware for auth and validation that copied endpoints miss."*
 
 ## Installation
 
