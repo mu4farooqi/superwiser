@@ -24,13 +24,13 @@
         ]
       }
     ],
-    "PostToolUse": [
+    "PreToolUse": [
       {
         "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/check-conflicts.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/conflict-gate.py\"",
             "timeout": 3
           }
         ]

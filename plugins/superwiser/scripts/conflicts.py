@@ -48,11 +48,12 @@ def check_pending_conflicts(db_path: str) -> str | None:
             db.execute("UPDATE pending_conflicts SET shown = TRUE WHERE context_id = ?", [context_id])
             db.commit()
 
-            lines = [f"\nSuperWiser (Conflict) [{context_id}]:\n"]
+            lines = [f"SuperWiser Conflict [{context_id}]:"]
             for i, (rule, context) in enumerate(rules, 1):
                 preview = format_context_preview(context)
-                lines.append(f"[{i}]{preview}: \"{rule}\"")
-            lines.append("\nWhich should I follow? (e.g., '1', '2', 'both', or explain when each applies)\n")
+                lines.append(f"  [{i}]{preview}: \"{rule}\"")
+            lines.append("")
+            lines.append("Pick a number, say 'all'/'both', explain when each applies, or 'skip' to ignore.")
             return "\n".join(lines)
     except Exception:
         return None

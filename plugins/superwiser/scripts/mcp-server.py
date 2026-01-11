@@ -23,59 +23,79 @@ def get_db_path() -> str:
 
 
 @mcp.tool()
-def search_preferences(query: str, limit: int = 5) -> str:
-    """Search user's recorded preferences and coding decisions.
+def search_rules(query: str, tags: str = "", context: str = "", limit: int = 5) -> str:
+    """Search user's recorded rules and coding decisions.
 
-    Use this to understand how the user likes things done - their coding style,
+    WHEN TO USE:
+    - Before important decisions (architecture, libraries, patterns, tech choices)
+    - When starting a new task to understand relevant preferences
+    - When unsure about coding style, conventions, or approaches
+    - Periodically during longer tasks to stay aligned with user preferences
+
+    This helps you understand how the user likes things done - their coding style,
     preferred libraries, architectural patterns, and past decisions.
 
-    Results include a context_id (like 'x7k9m2') for each rule.
-
-    IMPORTANT - Conflict Handling:
-    If any result shows "⚠️ CONFLICT [id]", there are conflicting rules for that topic.
-    You MUST ask the user which rule to follow before proceeding. Format your question as:
-    "SuperWiser (Conflict) [id]: <describe the conflicting rules and ask which to follow>"
+    CONFLICT HANDLING:
+    If results show "⚠️ CONFLICT [id]", you must ask user which rule to follow before proceeding.
+    Format your question as: "SuperWiser (Conflict) [id]: <describe the conflicting rules and ask which to follow>"
+    After the user responds to resolve the conflict, you do not need to call any tools to resolve or delete rules. This is handled automatically in the background.
 
     Args:
-        query: What to search for (e.g., 'error handling', 'testing', 'naming conventions')
+        query: What to search for (e.g., 'error handling', 'testing', 'database')
+        tags: Optional comma-separated tags to filter by (e.g., 'javascript,react')
+        context: HIGHLY RECOMMENDED - describe what you're deciding for better results
+                 (e.g., 'Setting up user authentication with JWT')
         limit: Maximum number of results to return (default: 5)
 
-    Returns:
-        Formatted list of relevant user preferences and decisions
+    Examples:
+        search_rules("database", context="Choosing database for user data")
+        search_rules("testing", tags="python")
+        search_rules("error handling", context="Setting up API error responses")
     """
     db_path = get_db_path()
 
     if not Path(db_path).exists():
-        return "No preferences recorded yet. The user needs to use Claude Code for a while first."
+        return "No rules recorded yet. The user needs to use Claude Code for a while first."
 
     try:
-        results = search(db_path, query, limit)
+        # Build search query combining query, tags, and context
+        search_query = query
+        if tags:
+            # Add tag filters to search
+            tag_list = [t.strip() for t in tags.split(',') if t.strip()]
+            if tag_list:
+                search_query = f"{query} {' '.join(f'#{t}' for t in tag_list)}"
+        if context:
+            # Append context for semantic matching
+            search_query = f"{search_query} {context}"
+
+        results = search(db_path, search_query, limit)
         if not results:
-            return f"No preferences found matching '{query}'."
+            return f"No rules found matching '{query}'." + (f" (tags: {tags})" if tags else "")
         return format_results(results)
     except Exception as e:
-        return f"Error searching preferences: {e}"
+        return f"Error searching rules: {e}"
 
 
 @mcp.tool()
-def get_context(id: str) -> str:
-    """Get a specific context with all its rules by ID.
+def get_rule(id: str) -> str:
+    """Get a specific rule by its ID.
 
     Args:
-        id: The 6-character context ID (e.g., 'x7k9m2')
+        id: The 6-character rule ID (e.g., 'x7k9m2')
 
     Returns:
-        Context details with all rules, or error message
+        Rule details including context and tags, or error message
     """
     db_path = get_db_path()
     if not Path(db_path).exists():
-        return f"Context {id} not found"
+        return f"Rule {id} not found"
 
     try:
         with db_context(db_path, timeout=5.0) as db:
             ctx = db.execute("SELECT id, tags FROM context_graph WHERE id = ?", [id]).fetchone()
             if not ctx:
-                return f"Context {id} not found"
+                return f"Rule {id} not found"
 
             rules = db.execute("""
                 SELECT rule, context, confidence FROM rules
@@ -87,48 +107,8 @@ def get_context(id: str) -> str:
                 "tags": json.loads(ctx[1]) if ctx[1] else [],
                 "rules": [{"index": i, "rule": r[0], "context": r[1], "confidence": r[2]}
                           for i, r in enumerate(rules, 1)],
-                "has_conflict": len(rules) > 1
+                "conflict": len(rules) > 1
             }, indent=2)
-    except Exception as e:
-        return f"Error: {e}"
-
-
-@mcp.tool()
-def list_conflicts() -> str:
-    """List all unresolved conflicts (contexts with multiple rules).
-
-    Returns:
-        List of conflicting contexts with their rules, or message if none
-    """
-    db_path = get_db_path()
-    if not Path(db_path).exists():
-        return "No conflicts found"
-
-    try:
-        with db_context(db_path, timeout=5.0) as db:
-            conflicts = db.execute("""
-                SELECT cg.id, cg.tags, COUNT(r.id) as rule_count
-                FROM context_graph cg JOIN rules r ON r.context_id = cg.id
-                GROUP BY cg.id HAVING rule_count > 1
-                ORDER BY cg.created_at DESC LIMIT 20
-            """).fetchall()
-
-            if not conflicts:
-                return "No conflicts found"
-
-            results = []
-            for ctx_id, tags, count in conflicts:
-                rules = db.execute(
-                    "SELECT rule, confidence FROM rules WHERE context_id = ? ORDER BY created_at",
-                    [ctx_id]
-                ).fetchall()
-                results.append({
-                    "id": ctx_id,
-                    "tags": json.loads(tags) if tags else [],
-                    "rule_count": count,
-                    "rules": [{"index": i, "rule": r[0], "confidence": r[1]} for i, r in enumerate(rules, 1)]
-                })
-            return json.dumps(results, indent=2)
     except Exception as e:
         return f"Error: {e}"
 
@@ -174,86 +154,158 @@ def initialize() -> str:
 
 
 @mcp.tool()
-def list_recent_rules(limit: int = 20) -> str:
-    """List the most recently captured rules and decisions.
+def list_rules(limit: int = 10, sort_by: str = "recent") -> str:
+    """List captured rules with total count.
+
+    WHEN TO USE:
+    - At the start of a session to understand user's key preferences
+    - Use sort_by="important" or "hits" to see most relevant rules
+    - Complements search_rules which is for specific decisions
+
+    SORT OPTIONS:
+    - "recent": Newest rules first (default)
+    - "hits": Most searched rules first (raw search hit count)
+    - "important": Composite score combining:
+        * Search hits (40%): How often this rule appears in searches
+        * Duplicate validation (30%): Prompts skipped as duplicates of this rule
+        * Confidence (10%): strong > normal > weak > tentative
+        * Conflict survival (10%): User explicitly chose this rule over alternatives
+        * Recency (10%): Recently used rules score higher
+
+    CONFLICT HANDLING:
+    If results show "CONFLICT [id]", you must ask user which rule to follow before proceeding.
+    Format your question as: "SuperWiser (Conflict) [id]: <describe the conflicting rules and ask which to follow>"
+    After the user responds, conflict resolution is handled automatically in the background.
 
     Args:
-        limit: Maximum number of rules to return (default: 20)
+        limit: Maximum number of rules to show (default: 10)
+        sort_by: Sort order - "recent" (default), "important", or "hits"
 
     Returns:
-        JSON list of recent rules with id, rule text, confidence, and date
+        JSON with rules, total count, and importance info
     """
     db_path = get_db_path()
     if not Path(db_path).exists():
-        return "No rules recorded yet."
+        return json.dumps({"rules": [], "total": 0, "showing": 0})
 
     try:
         with db_context(db_path, timeout=5.0) as db:
-            rules = db.execute("""
-                SELECT r.context_id, r.rule, r.confidence, date(r.created_at) as date
-                FROM rules r ORDER BY r.created_at DESC LIMIT ?
+            # Get total count
+            total = db.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
+
+            # Determine sort order
+            order_clause = {
+                "recent": "r.created_at DESC",
+                "important": "COALESCE(r.importance_score, 0) DESC",
+                "hits": "COALESCE(r.search_hit_count, 0) DESC"
+            }.get(sort_by, "r.created_at DESC")
+
+            # Get rules with importance info
+            rules = db.execute(f"""
+                SELECT r.context_id, r.rule, r.context, r.confidence, date(r.created_at) as date,
+                       COALESCE(r.importance_score, 0) as importance_score,
+                       COALESCE(r.search_hit_count, 0) as search_hits
+                FROM rules r ORDER BY {order_clause} LIMIT ?
             """, [limit]).fetchall()
 
-            if not rules:
-                return "No rules recorded yet."
-
-            return json.dumps([
-                {"id": r[0], "rule": r[1], "confidence": r[2], "date": r[3]}
-                for r in rules
-            ], indent=2)
+            return json.dumps({
+                "rules": [
+                    {
+                        "id": r[0], "rule": r[1], "context": r[2], "confidence": r[3],
+                        "date": r[4], "importance_score": round(r[5], 1), "search_hits": r[6]
+                    }
+                    for r in rules
+                ],
+                "total": total,
+                "showing": len(rules),
+                "sorted_by": sort_by
+            }, indent=2)
     except Exception as e:
         return f"Error: {e}"
 
 
 @mcp.tool()
 def get_stats() -> str:
-    """Get statistics about recorded rules.
+    """Get statistics about captured rules and their importance.
+
+    Returns rule counts, search statistics, and the most important rules
+    based on search frequency, duplicate validation, and conflict survival.
 
     Returns:
-        JSON with total rules, context groups, confidence breakdown, queue status, and pending conflicts
+        JSON with rule statistics including most important rules
     """
     db_path = get_db_path()
     if not Path(db_path).exists():
-        return json.dumps({"error": "No database found. Start using Superwiser to record preferences."})
+        return json.dumps({"error": "No rules recorded yet"})
 
     try:
         with db_context(db_path, timeout=5.0) as db:
-            # Rule stats
-            rule_stats = db.execute("""
-                SELECT
-                    COUNT(*) as total_rules,
-                    COUNT(DISTINCT context_id) as context_groups,
-                    SUM(CASE WHEN confidence='strong' THEN 1 ELSE 0 END) as strong,
-                    SUM(CASE WHEN confidence='normal' THEN 1 ELSE 0 END) as normal,
-                    SUM(CASE WHEN confidence='weak' THEN 1 ELSE 0 END) as weak
-                FROM rules
-            """).fetchone()
-
-            # Queue status
-            queue_stats = db.execute("""
-                SELECT status, COUNT(*) FROM queue GROUP BY status
-            """).fetchall()
+            # Total counts
+            total_rules = db.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
+            total_contexts = db.execute("SELECT COUNT(*) FROM context_graph").fetchone()[0]
 
             # Pending conflicts
-            conflicts = db.execute("""
-                SELECT COUNT(*) FROM pending_conflicts WHERE shown = FALSE
-            """).fetchone()
+            pending_conflicts = db.execute(
+                "SELECT COUNT(*) FROM pending_conflicts WHERE shown = FALSE"
+            ).fetchone()[0]
+
+            # Usage stats
+            try:
+                total_search_hits = db.execute(
+                    "SELECT SUM(COALESCE(search_hit_count, 0)) FROM rules"
+                ).fetchone()[0] or 0
+            except Exception:
+                total_search_hits = 0
+
+            # Duplicate skip count
+            try:
+                total_duplicate_skips = db.execute(
+                    "SELECT SUM(COALESCE(duplicate_skip_count, 0)) FROM rules"
+                ).fetchone()[0] or 0
+            except Exception:
+                total_duplicate_skips = 0
+
+            # Conflict survivors
+            try:
+                conflict_survivors = db.execute(
+                    "SELECT COUNT(*) FROM rules WHERE survived_conflict = TRUE"
+                ).fetchone()[0]
+            except Exception:
+                conflict_survivors = 0
+
+            # Top 5 most important rules
+            try:
+                top_rules = db.execute("""
+                    SELECT r.context_id, r.rule, COALESCE(r.importance_score, 0) as score,
+                           COALESCE(r.search_hit_count, 0) as hits,
+                           COALESCE(r.duplicate_skip_count, 0) as dups
+                    FROM rules r
+                    ORDER BY score DESC
+                    LIMIT 5
+                """).fetchall()
+            except Exception:
+                top_rules = []
 
             return json.dumps({
-                "rules": {
-                    "total": rule_stats[0],
-                    "context_groups": rule_stats[1],
-                    "by_confidence": {
-                        "strong": rule_stats[2],
-                        "normal": rule_stats[3],
-                        "weak": rule_stats[4]
+                "total_rules": total_rules,
+                "total_contexts": total_contexts,
+                "pending_conflicts": pending_conflicts,
+                "total_search_hits": total_search_hits,
+                "total_duplicate_skips": total_duplicate_skips,
+                "conflict_survivors": conflict_survivors,
+                "most_important_rules": [
+                    {
+                        "id": r[0],
+                        "rule": r[1][:100] + "..." if len(r[1]) > 100 else r[1],
+                        "importance_score": round(r[2], 1),
+                        "search_hits": r[3],
+                        "duplicate_skips": r[4]
                     }
-                },
-                "queue": {s[0]: s[1] for s in queue_stats} if queue_stats else {},
-                "pending_conflicts": conflicts[0] if conflicts else 0
+                    for r in top_rules
+                ]
             }, indent=2)
     except Exception as e:
-        return f"Error: {e}"
+        return json.dumps({"error": str(e)})
 
 
 @mcp.tool()
@@ -290,74 +342,38 @@ def list_tags() -> str:
 
 
 @mcp.tool()
-def export_preferences(output_format: str = "json") -> str:
-    """Export all captured preferences.
+def delete_rule(rule_id: str) -> str:
+    """Delete a rule by its ID.
 
     Args:
-        output_format: Output format - "json" or "text" (default: "json")
-
-    Returns:
-        All preferences in the requested format
-    """
-    db_path = get_db_path()
-    if not Path(db_path).exists():
-        return "No preferences recorded yet."
-
-    try:
-        results = search(db_path, "", limit=9999)
-        if not results:
-            return "No preferences recorded yet."
-
-        if output_format == "json":
-            return json.dumps([
-                {
-                    "id": r.get("context_id"),
-                    "rule": r.get("rule"),
-                    "context": r.get("context"),
-                    "confidence": r.get("confidence"),
-                    "tags": r.get("tags", [])
-                }
-                for r in results
-            ], indent=2)
-        else:
-            return format_results(results)
-    except Exception as e:
-        return f"Error: {e}"
-
-
-@mcp.tool()
-def delete_context(context_id: str) -> str:
-    """Delete a rule group by context ID.
-
-    Args:
-        context_id: The 6-character context ID (e.g., 'x7k9m2')
+        rule_id: The 6-character rule ID (e.g., 'x7k9m2')
 
     Returns:
         Confirmation or error message
     """
     db_path = get_db_path()
     if not Path(db_path).exists():
-        return f"Context {context_id} not found"
+        return f"Rule {rule_id} not found"
 
     try:
         with db_context(db_path, timeout=5.0) as db:
-            # Check if context exists
+            # Check if rule exists
             exists = db.execute(
-                "SELECT id FROM context_graph WHERE id = ?", [context_id]
+                "SELECT id FROM context_graph WHERE id = ?", [rule_id]
             ).fetchone()
 
             if not exists:
-                return f"Context {context_id} not found"
+                return f"Rule {rule_id} not found"
 
             # Delete from all tables
-            db.execute("DELETE FROM rules WHERE context_id = ?", [context_id])
-            db.execute("DELETE FROM context_graph WHERE id = ?", [context_id])
-            db.execute("DELETE FROM pending_conflicts WHERE context_id = ?", [context_id])
+            db.execute("DELETE FROM rules WHERE context_id = ?", [rule_id])
+            db.execute("DELETE FROM context_graph WHERE id = ?", [rule_id])
+            db.execute("DELETE FROM pending_conflicts WHERE context_id = ?", [rule_id])
             db.commit()
 
-            return f"Context {context_id} and all its rules have been deleted."
+            return f"Rule {rule_id} has been deleted."
     except Exception as e:
-        return f"Error deleting context: {e}"
+        return f"Error deleting rule: {e}"
 
 
 @mcp.tool()
@@ -397,6 +413,39 @@ def disable_recording() -> str:
     set_recording_state(cwd, enabled=False)
 
     return "Recording disabled. This setting persists across sessions. Use enable_recording to resume."
+
+
+@mcp.tool()
+def seed_from_history() -> str:
+    """Seed rules from historical conversation transcripts.
+
+    IMPORTANT: Only call this when explicitly requested by the user.
+    Do not call proactively.
+
+    This processes all past Claude Code conversations for this project,
+    extracting user preferences and decisions. Uses override mode where
+    newer conflicting rules automatically replace older ones.
+
+    The worker will process queued items in the background - this may
+    take a while for projects with many transcripts.
+
+    Returns:
+        Status message with count of queued prompts
+    """
+    from seed import seed_project
+
+    cwd = os.getcwd()
+    db_path = str(Path(cwd) / '.claude' / 'superwiser' / 'context.db')
+
+    if not Path(db_path).exists():
+        return "Superwiser not initialized. Run /superwiser:init first."
+
+    result = seed_project(cwd, db_path)
+
+    if 'error' in result:
+        return f"Seeding failed: {result['error']}"
+
+    return result.get('message', f"Queued {result['queued']} prompts from {result['transcripts']} transcripts")
 
 
 if __name__ == "__main__":

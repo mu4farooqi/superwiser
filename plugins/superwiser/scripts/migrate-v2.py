@@ -8,16 +8,12 @@ Usage: python3 migrate-v2.py /path/to/context.db
 """
 import sqlite3
 import json
-import secrets
-import string
 import sys
 from pathlib import Path
 
-
-def generate_id():
-    """Generate 6-char alphanumeric ID like 'x7k9m2'"""
-    alphabet = string.ascii_lowercase + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(6))
+SCRIPT_DIR = Path(__file__).parent
+sys.path.insert(0, str(SCRIPT_DIR))
+from db_utils import generate_id
 
 
 def is_v1_schema(db):
@@ -87,10 +83,17 @@ def migrate(db_path: str):
             confidence TEXT DEFAULT 'normal',
             source_session TEXT,
             source_position INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            -- Importance tracking columns
+            search_hit_count INTEGER DEFAULT 0,
+            duplicate_skip_count INTEGER DEFAULT 0,
+            importance_score REAL DEFAULT 0.0,
+            survived_conflict BOOLEAN DEFAULT FALSE,
+            last_hit_at TIMESTAMP
         );
 
         CREATE INDEX idx_rules_context ON rules(context_id);
+        CREATE INDEX idx_rules_importance ON rules(importance_score DESC);
 
         -- Pending conflicts table (one per context)
         CREATE TABLE pending_conflicts (
@@ -180,10 +183,59 @@ def migrate(db_path: str):
     print(f"Migration complete: {len(old_rows)} rules migrated to v2 schema")
 
 
+def add_importance_columns(db_path: str):
+    """Add importance tracking columns to existing v2 database."""
+    if not Path(db_path).exists():
+        print(f"Database not found: {db_path}")
+        return False
+
+    db = sqlite3.connect(db_path)
+
+    # Check if already has importance columns
+    try:
+        db.execute("SELECT importance_score FROM rules LIMIT 1")
+        print("Importance columns already exist")
+        db.close()
+        return True
+    except sqlite3.OperationalError:
+        pass
+
+    print("Adding importance tracking columns...")
+
+    # Add new columns to rules table (one at a time for SQLite)
+    for col in [
+        "search_hit_count INTEGER DEFAULT 0",
+        "duplicate_skip_count INTEGER DEFAULT 0",
+        "importance_score REAL DEFAULT 0.0",
+        "survived_conflict BOOLEAN DEFAULT FALSE",
+        "last_hit_at TIMESTAMP"
+    ]:
+        try:
+            db.execute(f"ALTER TABLE rules ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass  # Column exists
+
+    # Create importance index
+    try:
+        db.execute("CREATE INDEX idx_rules_importance ON rules(importance_score DESC)")
+    except sqlite3.OperationalError:
+        pass  # Index exists
+
+    db.commit()
+    db.close()
+    print("Importance tracking columns added successfully")
+    return True
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: migrate-v2.py <db_path>")
+        print("Usage: migrate-v2.py <db_path> [--add-importance]")
         print("Example: migrate-v2.py .claude/superwiser/context.db")
+        print("         migrate-v2.py .claude/superwiser/context.db --add-importance")
         sys.exit(1)
 
-    migrate(sys.argv[1])
+    db_path = sys.argv[1]
+    if len(sys.argv) > 2 and sys.argv[2] == "--add-importance":
+        add_importance_columns(db_path)
+    else:
+        migrate(db_path)

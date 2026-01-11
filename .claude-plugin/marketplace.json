@@ -1,8 +1,8 @@
 {
-  "name": "superwiser-local",
-  "description": "Local development marketplace for superwiser",
+  "name": "superwiser",
+  "description": "Marketplace for superwiser plugins",
   "owner": {
-    "name": "Developer"
+    "name": "Omar Ahmad"
   },
   "plugins": [
     {
@@ -11,7 +11,7 @@
       "description": "Extract and search human decisions from Claude Code sessions",
       "version": "1.1.0",
       "author": {
-        "name": "Developer"
+        "name": "Omar Ahmad"
       }
     }
   ]

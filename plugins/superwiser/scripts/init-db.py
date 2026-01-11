@@ -24,7 +24,9 @@ def init_db(db_path: str):
             context_blob BLOB,
             session_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status TEXT DEFAULT 'pending'
+            status TEXT DEFAULT 'pending',
+            reason TEXT,
+            override_mode BOOLEAN DEFAULT FALSE
         );
 
         CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status, created_at);
@@ -48,10 +50,17 @@ def init_db(db_path: str):
             confidence TEXT DEFAULT 'normal',
             source_session TEXT,
             source_position INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            -- Importance tracking columns
+            search_hit_count INTEGER DEFAULT 0,
+            duplicate_skip_count INTEGER DEFAULT 0,
+            importance_score REAL DEFAULT 0.0,
+            survived_conflict BOOLEAN DEFAULT FALSE,
+            last_hit_at TIMESTAMP  -- Used for recency in importance scoring
         );
 
         CREATE INDEX IF NOT EXISTS idx_rules_context ON rules(context_id);
+        CREATE INDEX IF NOT EXISTS idx_rules_importance ON rules(importance_score DESC);
 
         -- Pending conflicts to show user (one per context)
         CREATE TABLE IF NOT EXISTS pending_conflicts (

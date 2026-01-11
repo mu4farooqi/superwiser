@@ -23,6 +23,10 @@ EXTRACTION_PROMPT = '''You extract reusable rules from human feedback, correctio
 
 CRITICAL: Your response must be ONLY valid JSON. No explanation, no markdown, no text before or after. Just the JSON object.
 
+<project_directory>
+{project_dir}
+</project_directory>
+
 <human_message>
 {human_input}
 </human_message>
@@ -33,9 +37,13 @@ Lines: {context_lines}
 Format: JSONL (most recent at end)
 </context_file>
 
+When the user references files (e.g., "check utils.py", "as shown in config.ts"),
+search for them in the project directory above using Glob, then Read.
+The context file above is a temp copy - read it directly at the given path.
+
 <task>
 1. Read context file from end to understand what agent was doing when human intervened
-2. Use search_preferences to check for existing similar rules
+2. Use search_rules to check for existing similar rules
 3. Extract guidance as reusable rule, or handle conflict resolution
 </task>
 
@@ -49,7 +57,7 @@ Before extracting, search for similar existing rules.
 
 <resolution>
 If the context contains a conflict ID like [x7k9m2], the user is resolving a conflict.
-Call get_context("x7k9m2") to see the conflicting rules, then interpret user's guidance.
+Call get_rule("x7k9m2") to see the conflicting rules, then interpret user's guidance.
 
 User can do one of the following but not limited to:
 - Pick one

@@ -1,28 +1,30 @@
 ---
-description: "Search your recorded preferences"
+description: "Search your recorded rules"
 ---
 
-# Search Preferences
+# Search Rules
 
-Search your recorded coding preferences and decisions.
+Search your recorded coding rules and decisions.
 
 ## Usage
 
 ```
-/search <query>
+/superwiser:search <query> [#tag1 #tag2]
 ```
 
 ## Examples
 
 ```
-/search typescript
-/search testing
-/search authentication
-/search code style
+/superwiser:search typescript
+/superwiser:search testing #python
+/superwiser:search database #postgresql #backend
+/superwiser:search error handling
 ```
 
 ## Instructions
 
-Call the `search_preferences` MCP tool from superwiser with the user's query.
+Call the `search_rules` MCP tool from superwiser with the user's query.
 
-Show the results to the user in a readable format.
+If the user includes hashtags, extract them and pass as the `tags` parameter (comma-separated, without #).
+
+**Important**: Do not display the raw tool result. Present the results in a clean, readable format with the rule text, context, confidence level, and ID.

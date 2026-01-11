@@ -5,32 +5,20 @@ Also checks for and displays pending conflicts to the user.
 """
 import gzip
 import json
-import re
 import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
-from db_utils import db_context
+from db_utils import db_context, hook_output
 from config import CONTEXT_MAX_LINES
 from conflicts import check_pending_conflicts
 from ensure_init import ensure_ready
-
-SECRET_PATTERNS = [
-    r'(?i)(api[_-]?key|secret|token|password|credential)\s*[:=]\s*[\'"]?[\w-]{16,}',
-    r'sk-[a-zA-Z0-9]{20,}',              # OpenAI API keys
-    r'ghp_[a-zA-Z0-9]{36}',              # GitHub personal access tokens
-    r'AKIA[0-9A-Z]{16}',                 # AWS Access Key IDs
-    r'-----BEGIN\s+(?:RSA|DSA|EC|OPENSSH|PGP)?\s*PRIVATE\s+KEY-----',  # Private keys
-]
-
-
-def contains_secrets(text: str) -> bool:
-    return any(re.search(p, text) for p in SECRET_PATTERNS)
+from transcript_utils import contains_secrets, filter_transcript_entry
 
 
 def read_and_compress_context(transcript_path: str, max_lines: int) -> tuple[bytes | None, int]:
-    """Read last N lines from transcript and compress them."""
+    """Read last N lines from transcript, filter, and compress them."""
     if not transcript_path or not Path(transcript_path).exists():
         return None, 0
 
@@ -39,8 +27,43 @@ def read_and_compress_context(transcript_path: str, max_lines: int) -> tuple[byt
             lines = f.readlines()
 
         total_lines = len(lines)
+        
+        # Take last N lines and filter them
         context_lines = lines[-max_lines:] if len(lines) > max_lines else lines
-        context_text = ''.join(context_lines)
+        
+        filtered_entries = []
+        seen_texts = set()  # Deduplicate repeated assistant messages
+        
+        for line in context_lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            try:
+                entry = json.loads(line)
+                filtered = filter_transcript_entry(entry)
+                
+                if filtered:
+                    # Deduplicate assistant text responses (streaming can cause duplicates)
+                    if filtered.get('role') == 'assistant':
+                        content = filtered.get('content', [])
+                        if content and isinstance(content, list):
+                            text_items = [c.get('text', '') for c in content if c.get('type') == 'text']
+                            text_key = ''.join(text_items)[:100]
+                            if text_key and text_key in seen_texts:
+                                continue
+                            if text_key:
+                                seen_texts.add(text_key)
+                    
+                    filtered_entries.append(filtered)
+            except json.JSONDecodeError:
+                continue
+        
+        if not filtered_entries:
+            return None, 0
+        
+        # Convert back to compact JSON lines
+        context_text = '\n'.join(json.dumps(e, ensure_ascii=False) for e in filtered_entries)
         compressed = gzip.compress(context_text.encode('utf-8'))
 
         return compressed, total_lines
@@ -48,19 +71,11 @@ def read_and_compress_context(transcript_path: str, max_lines: int) -> tuple[byt
         return None, 0
 
 
-def output_continue(msg: str | None = None) -> None:
-    """Output JSON response for hook."""
-    response = {"continue": True}
-    if msg:
-        response["systemMessage"] = msg
-    print(json.dumps(response))
-
-
 def main() -> None:
     try:
         data = json.load(sys.stdin)
     except Exception:
-        output_continue()
+        hook_output()
         return
 
     user_prompt = data.get('prompt', '') or data.get('user_prompt', '')
@@ -69,27 +84,40 @@ def main() -> None:
     transcript_path = data.get('transcript_path', '')
 
     if not ensure_ready(cwd):
-        output_continue()
+        hook_output()
         return
 
     db_path = str(Path(cwd).resolve() / '.claude' / 'superwiser' / 'context.db')
 
     conflict_msg = check_pending_conflicts(db_path)
     if conflict_msg:
-        output_continue(conflict_msg)
+        # Block prompt and FORCE Claude to present conflict to user
+        result = {
+            "decision": "block",
+            "reason": f"""⚠️ STOP - CONFLICT RESOLUTION REQUIRED
+
+Present this conflict to the user:
+
+{conflict_msg}
+
+IMPORTANT: You MUST ask the user to act on this. After they respond:
+- Do NOT call any tools to resolve or delete rules
+- Do NOT try to process their response
+- Just continue with what you were originally doing
+- The conflict resolution is handled automatically in the background"""
+        }
+        print(json.dumps(result))
+        return
 
     prompt_stripped = user_prompt.strip()
     if not prompt_stripped:
-        if not conflict_msg:
-            output_continue()
+        hook_output()
         return
     if prompt_stripped.startswith('/superwiser:'):
-        if not conflict_msg:
-            output_continue()
+        hook_output()
         return
     if contains_secrets(user_prompt):
-        if not conflict_msg:
-            output_continue()
+        hook_output()
         return
 
     context_blob, total_lines = read_and_compress_context(transcript_path, CONTEXT_MAX_LINES)
@@ -106,8 +134,7 @@ def main() -> None:
     except Exception:
         pass
 
-    if not conflict_msg:
-        output_continue()
+    hook_output()
 
 
 if __name__ == '__main__':

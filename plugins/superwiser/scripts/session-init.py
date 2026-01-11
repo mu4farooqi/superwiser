@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
 """
-Unified SessionStart hook - handles all session initialization in one script.
-
-Combines:
-- Dependency installation (smart-install.py)
-- Worker daemon startup (worker-service.py)
-- Project registration (register-project.py)
-
-Benefits:
-- Single subprocess spawn instead of 3
-- Faster session startup
-- Cleaner error handling
-- Shared state between steps
+Unified SessionStart hook - handles all session initialization:
+- Dependency installation
+- Worker daemon startup
+- Project registration
+- Database initialization
 """
 
 import json
@@ -23,6 +16,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from ensure_init import is_recording_disabled, is_worker_running
+from db_utils import hook_output
 
 SUPERWISER_DIR = Path.home() / '.superwiser'
 VENV_DIR = SUPERWISER_DIR / 'venv'
@@ -40,14 +34,6 @@ PACKAGES = [
     ('mcp', 'mcp')
 ]
 VERSION = "1.2.2"
-
-
-def output(msg: str | None = None) -> None:
-    """Output JSON response for hook."""
-    response = {"continue": True}
-    if msg:
-        response["systemMessage"] = msg
-    print(json.dumps(response))
 
 
 # ============== Dependency Installation ==============
@@ -272,7 +258,7 @@ def main() -> None:
     else:
         msg = "**Superwiser** active - learning your coding preferences."
 
-    output(msg)
+    hook_output(msg)
 
 
 if __name__ == '__main__':

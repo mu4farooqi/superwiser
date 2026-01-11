@@ -66,3 +66,7 @@ htmlcov/
 tmp/
 temp/
 
+# Local cleanup script
+plugins/superwiser/scripts/cleanup.py
+
+
