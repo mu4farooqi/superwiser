@@ -11,10 +11,10 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from db_utils import db_context, hook_output
-from config import CONTEXT_MAX_LINES
+from config import CONTEXT_MAX_LINES, is_extraction_prompt
 from conflicts import check_pending_conflicts
 from ensure_init import ensure_ready
-from transcript_utils import contains_secrets, filter_transcript_entry
+from transcript_utils import contains_secrets, filter_transcript_entry, is_system_message
 
 
 def read_and_compress_context(transcript_path: str, max_lines: int) -> tuple[bytes | None, int]:
@@ -83,6 +83,15 @@ def main() -> None:
     cwd = data.get('cwd', '.')
     transcript_path = data.get('transcript_path', '')
 
+    # Skip extraction sessions running in /tmp/superwiser (prevents infinite recursion)
+    if cwd.startswith('/tmp/superwiser'):
+        hook_output()
+        return
+    # Fallback: also check prompt content in case cwd check fails
+    if is_extraction_prompt(user_prompt):
+        hook_output()
+        return
+
     if not ensure_ready(cwd):
         hook_output()
         return
@@ -114,6 +123,10 @@ IMPORTANT: You MUST ask the user to act on this. After they respond:
         hook_output()
         return
     if prompt_stripped.startswith('/superwiser:'):
+        hook_output()
+        return
+    # Skip system messages (command output, task notifications, etc)
+    if is_system_message(user_prompt):
         hook_output()
         return
     if contains_secrets(user_prompt):

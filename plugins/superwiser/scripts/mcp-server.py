@@ -286,6 +286,20 @@ def get_stats() -> str:
             except Exception:
                 top_rules = []
 
+            # Pending work (prompts being analyzed for rules)
+            try:
+                pending_analysis = db.execute(
+                    "SELECT COUNT(*) FROM queue WHERE status = 'pending'"
+                ).fetchone()[0]
+                processing_now = db.execute(
+                    "SELECT COUNT(*) FROM queue WHERE status = 'processing'"
+                ).fetchone()[0]
+                failed_analysis = db.execute(
+                    "SELECT COUNT(*) FROM queue WHERE status = 'failed'"
+                ).fetchone()[0]
+            except Exception:
+                pending_analysis = processing_now = failed_analysis = 0
+
             return json.dumps({
                 "total_rules": total_rules,
                 "total_contexts": total_contexts,
@@ -293,6 +307,9 @@ def get_stats() -> str:
                 "total_search_hits": total_search_hits,
                 "total_duplicate_skips": total_duplicate_skips,
                 "conflict_survivors": conflict_survivors,
+                "pending_analysis": pending_analysis,
+                "processing_now": processing_now,
+                "failed_analysis": failed_analysis,
                 "most_important_rules": [
                     {
                         "id": r[0],
@@ -416,18 +433,49 @@ def disable_recording() -> str:
 
 
 @mcp.tool()
-def seed_from_history() -> str:
+def seed_preview() -> str:
+    """Preview available transcripts before seeding.
+
+    IMPORTANT: Call this FIRST before seed_from_history to show the user
+    what transcripts are available and let them choose which to process.
+
+    Returns transcript count, date range, and options for filtering.
+
+    Returns:
+        JSON with transcript statistics and filtering options
+    """
+    from seed import get_transcript_stats
+
+    cwd = os.getcwd()
+    stats = get_transcript_stats(cwd)
+
+    if stats['count'] == 0:
+        return json.dumps({
+            'count': 0,
+            'message': 'No transcripts found for this project'
+        })
+
+    return json.dumps({
+        'count': stats['count'],
+        'oldest_date': stats['oldest_date'],
+        'newest_date': stats['newest_date']
+    }, indent=2)
+
+
+@mcp.tool()
+def seed_from_history(latest_n: int = None, after_date: str = None) -> str:
     """Seed rules from historical conversation transcripts.
 
-    IMPORTANT: Only call this when explicitly requested by the user.
-    Do not call proactively.
+    IMPORTANT: Call seed_preview FIRST to show the user options, then call
+    this with their chosen filter. Only call when explicitly requested.
 
-    This processes all past Claude Code conversations for this project,
-    extracting user preferences and decisions. Uses override mode where
-    newer conflicting rules automatically replace older ones.
+    Args:
+        latest_n: Only process the N most recent transcripts
+        after_date: Only process transcripts after this date (YYYY-MM-DD format)
+                   Note: latest_n and after_date are mutually exclusive
 
-    The worker will process queued items in the background - this may
-    take a while for projects with many transcripts.
+    Uses override mode where newer conflicting rules automatically replace older ones.
+    The worker processes queued items in the background.
 
     Returns:
         Status message with count of queued prompts
@@ -440,7 +488,7 @@ def seed_from_history() -> str:
     if not Path(db_path).exists():
         return "Superwiser not initialized. Run /superwiser:init first."
 
-    result = seed_project(cwd, db_path)
+    result = seed_project(cwd, db_path, latest_n=latest_n, after_date=after_date)
 
     if 'error' in result:
         return f"Seeding failed: {result['error']}"

@@ -21,6 +21,27 @@ def contains_secrets(text: str) -> bool:
     return any(p.search(text) for p in SECRET_PATTERNS)
 
 
+# System message patterns - these are NOT actual user input
+SYSTEM_MESSAGE_PREFIXES = (
+    '<local-command-',       # stdout, stderr, caveat from slash commands
+    '<command-',             # command-name, command-message
+    '<task-notification>',   # background task notifications
+    'This session is being continued from a previous conversation',  # context continuation
+)
+
+
+def is_system_message(text: str) -> bool:
+    """Check if text is a system-generated message, not actual user input.
+    
+    These are messages that Claude Code stores as type="user" but are
+    actually system output (command results, task notifications, etc).
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    return stripped.startswith(SYSTEM_MESSAGE_PREFIXES)
+
+
 def filter_transcript_entry(entry: dict) -> dict | None:
     """Filter and transform a transcript entry to keep only useful content.
 
@@ -42,8 +63,8 @@ def filter_transcript_entry(entry: dict) -> dict | None:
         message = entry.get('message', {})
         content = message.get('content', '')
 
-        # Skip empty or command-only messages
-        if not content or (isinstance(content, str) and content.startswith('<command-')):
+        # Skip empty or system messages (command output, task notifications, etc)
+        if not content or (isinstance(content, str) and is_system_message(content)):
             return None
 
         # Handle tool results (keep them, they're important context)

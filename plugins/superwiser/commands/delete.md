@@ -1,5 +1,6 @@
 ---
 description: "Delete a rule by ID"
+arguments: "<rule_id>"
 ---
 
 Remove a rule from the database.

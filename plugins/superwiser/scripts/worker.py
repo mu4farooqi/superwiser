@@ -29,8 +29,10 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from db_utils import get_db, load_sqlite_vec, generate_embedding, generate_id, insert_context_with_retry
 from config import (
     EXTRACTION_PROMPT, POLL_INTERVAL, RATE_LIMIT, HEAL_INTERVAL,
-    EXTRACTION_TIMEOUT, EXTRACTION_MAX_TURNS, MIN_PROMPT_LENGTH
+    EXTRACTION_TIMEOUT, EXTRACTION_MAX_TURNS, MIN_PROMPT_LENGTH,
+    EXTRACTION_CONCURRENCY, EXTRACTION_MODEL
 )
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SUPERWISER_DIR = Path.home() / '.superwiser'
 REGISTRY = SUPERWISER_DIR / 'projects.txt'
@@ -133,18 +135,31 @@ def context_has_conflict_id(context_text: str | None, check_lines: int = 5) -> b
     return bool(re.search(r'\[[a-z0-9]{6}\]', recent))
 
 
-def strip_markdown_json(text: str) -> str:
-    """Strip markdown code block wrapper from JSON if present."""
+def extract_json_from_response(text: str) -> str:
+    """Extract JSON from Claude's response, handling various formats.
+    
+    Claude may return:
+    - Pure JSON: {"rule": ...}
+    - Markdown wrapped: ```json\n{...}\n```
+    - Explanation followed by JSON: "Based on analysis...\n```json\n{...}\n```"
+    """
     text = text.strip()
-    # Handle ```json ... ``` or ``` ... ```
-    if text.startswith('```'):
-        # Remove opening fence (with optional language tag)
-        first_newline = text.find('\n')
-        if first_newline != -1:
-            text = text[first_newline + 1:]
-        # Remove closing fence
-        if text.rstrip().endswith('```'):
-            text = text.rstrip()[:-3].rstrip()
+    
+    # If it's already pure JSON, return as-is
+    if text.startswith('{'):
+        return text
+    
+    # Try to find JSON wrapped in markdown code blocks (anywhere in text)
+    match = re.search(r'```(?:json)?\s*\n(\{[\s\S]*?\})\s*```', text)
+    if match:
+        return match.group(1).strip()
+    
+    # Try to find a raw JSON object (last one in text, in case of multiple)
+    # Use a greedy search for the last complete JSON object
+    matches = list(re.finditer(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text))
+    if matches:
+        return matches[-1].group(0)
+    
     return text
 
 
@@ -189,6 +204,7 @@ def extract_with_claude(human_input: str, context_blob: bytes | None, db_path: s
         # Run from /tmp/superwiser to avoid triggering project hooks and auto-cleanup history
         result = subprocess.run(
             ['claude', '-p', prompt, '--output-format', 'json',
+             '--model', EXTRACTION_MODEL,
              '--max-turns', str(EXTRACTION_MAX_TURNS),
              '--allowedTools', 'Read,Glob,Grep,mcp__superwiser__search_rules,mcp__superwiser__get_rule',
              '--mcp-config', mcp_config_file],
@@ -211,8 +227,8 @@ def extract_with_claude(human_input: str, context_blob: bytes | None, db_path: s
             # result might be a string (Claude's text response) - try to parse as JSON
             if isinstance(inner, str):
                 try:
-                    # Strip markdown code blocks if Claude wrapped the JSON
-                    clean = strip_markdown_json(inner)
+                    # Extract JSON from Claude's response (handles markdown, explanations)
+                    clean = extract_json_from_response(inner)
                     parsed = json.loads(clean)
                 except json.JSONDecodeError:
                     log(f"Claude returned non-JSON: {inner[:100]}...")
@@ -465,49 +481,79 @@ def ensure_queue_columns(db) -> None:
         pass  # Column might already exist or other error
 
 
-def process_project_queue(project_path: str) -> bool:
+def fetch_pending_items(project_path: str, limit: int) -> list[dict]:
+    """Fetch pending items from a project's queue."""
     db_path = Path(project_path) / '.claude' / 'superwiser' / 'context.db'
     if not db_path.exists():
-        return False
-
-    db = get_db(str(db_path), timeout=10.0)
-    ensure_queue_columns(db)
-    vec_loaded = load_sqlite_vec(db, ensure_table=True)
-
-    item = db.execute("""
-        SELECT id, position, human_input, session_id, context_blob, override_mode
-        FROM queue WHERE status = 'pending'
-        ORDER BY created_at LIMIT 1
-    """).fetchone()
-
-    if not item:
-        db.close()
-        return False
-
-    item_dict = {
-        'id': item[0],
-        'position': item[1],
-        'human_input': item[2],
-        'session_id': item[3],
-        'context_blob': item[4],
-        'override_mode': bool(item[5]) if len(item) > 5 else False
-    }
-
-    db.execute("UPDATE queue SET status = 'processing' WHERE id = ?", [item[0]])
-    db.commit()
+        return []
 
     try:
-        process_item(db, item_dict, vec_loaded, str(db_path), project_path)
+        db = get_db(str(db_path), timeout=10.0)
+        ensure_queue_columns(db)
+        
+        items = db.execute("""
+            SELECT id, position, human_input, session_id, context_blob, override_mode
+            FROM queue WHERE status = 'pending'
+            ORDER BY created_at LIMIT ?
+        """, [limit]).fetchall()
+        
+        if not items:
+            db.close()
+            return []
+        
+        # Mark items as processing
+        ids = [item[0] for item in items]
+        placeholders = ','.join(['?'] * len(ids))
+        db.execute(f"UPDATE queue SET status = 'processing' WHERE id IN ({placeholders})", ids)
+        db.commit()
+        db.close()
+        
+        return [{
+            'id': item[0],
+            'position': item[1],
+            'human_input': item[2],
+            'session_id': item[3],
+            'context_blob': item[4],
+            'override_mode': bool(item[5]) if len(item) > 5 else False,
+            'project_path': project_path,
+            'db_path': str(db_path)
+        } for item in items]
+    except Exception as e:
+        log(f"Error fetching items from {project_path}: {e}")
+        return []
+
+
+def process_single_item(item: dict) -> bool:
+    """Process a single queue item. Called by thread pool."""
+    db_path = item['db_path']
+    project_path = item['project_path']
+    
+    try:
+        db = get_db(db_path, timeout=10.0)
+        vec_loaded = load_sqlite_vec(db, ensure_table=True)
+        process_item(db, item, vec_loaded, db_path, project_path)
+        db.close()
         return True
     except Exception as e:
         reason = f"Processing error: {type(e).__name__}: {str(e)[:150]}"
         log(f"Error: {reason}")
-        db.execute("UPDATE queue SET status = 'failed', reason = ? WHERE id = ?",
-                   [reason, item[0]])
-        db.commit()
+        try:
+            db = get_db(db_path, timeout=5.0)
+            db.execute("UPDATE queue SET status = 'failed', reason = ? WHERE id = ?",
+                       [reason, item['id']])
+            db.commit()
+            db.close()
+        except Exception:
+            pass
         return False
-    finally:
-        db.close()
+
+
+def process_project_queue(project_path: str) -> bool:
+    """Legacy single-item processing. Used when concurrency=1."""
+    items = fetch_pending_items(project_path, 1)
+    if not items:
+        return False
+    return process_single_item(items[0])
 
 
 def compute_importance_score(
@@ -692,17 +738,31 @@ def worker_loop() -> None:
         # Update permissions for all registered projects
         setup_project_permissions(projects)
         
-        processed_any = False
-
+        # Collect pending items from all projects
+        all_items = []
         for project in projects:
             if not running:
                 break
-            if process_project_queue(project):
-                processed_any = True
-                time.sleep(RATE_LIMIT)
-
-        if not processed_any:
+            items = fetch_pending_items(project, EXTRACTION_CONCURRENCY)
+            all_items.extend(items)
+        
+        if not all_items:
             time.sleep(POLL_INTERVAL)
+            continue
+        
+        # Process items concurrently
+        log(f"Processing {len(all_items)} items with concurrency {EXTRACTION_CONCURRENCY}")
+        with ThreadPoolExecutor(max_workers=EXTRACTION_CONCURRENCY) as executor:
+            futures = {executor.submit(process_single_item, item): item for item in all_items}
+            for future in as_completed(futures):
+                if not running:
+                    break
+                try:
+                    future.result()
+                except Exception as e:
+                    log(f"Thread error: {e}")
+        
+        time.sleep(RATE_LIMIT)
 
     log("Worker stopped")
 

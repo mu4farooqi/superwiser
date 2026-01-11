@@ -45,6 +45,11 @@ The context file above is a temp copy - read it directly at the given path.
 1. Read context file from end to understand what agent was doing when human intervened
 2. Use search_rules to check for existing similar rules
 3. Extract guidance as reusable rule, or handle conflict resolution
+
+IMPORTANT: When writing the "context" field, include:
+- What feature/task the agent was working on
+- What specific action/approach the agent took
+- Why the human intervened (what was wrong with the agent's approach)
 </task>
 
 <similarity_check>
@@ -72,7 +77,7 @@ Output format - resolution deletes the conflict group and optionally creates new
 <output_format>
 Return JSON:
 - rule: what to do and why
-- context: what agent saw/did before intervention (omit for universal rules)
+- context: 2-3 sentences describing (1) what feature/task agent was working on, (2) what agent did, (3) why human intervened. Omit only for truly universal rules like "use const not var"
 - tags: 2-4 lowercase tags
 - confidence: strong/normal/weak/tentative (from language like "NEVER" vs "maybe")
 - conflicts_with: context_id if conflicts with existing rule
@@ -83,13 +88,13 @@ Agent used var. Human says "const"
 {{"rule": "Use const instead of var - prevents accidental reassignment", "tags": ["javascript", "style"]}}
 
 Agent started setting up MongoDB for user auth. Human says "postgres, need foreign keys"
-{{"rule": "Use PostgreSQL for user data - relational data needs foreign key constraints", "context": "Agent was setting up MongoDB for user auth", "tags": ["database", "postgresql"]}}
+{{"rule": "Use PostgreSQL for user data - relational data needs foreign key constraints", "context": "Building user authentication system. Agent chose MongoDB for user storage, but the user-role relationships require foreign key constraints that MongoDB doesn't support.", "tags": ["database", "postgresql"]}}
 
 Agent wrapped every fetch in try/catch returning null. Human says "let it crash"
-{{"rule": "Let errors propagate - don't swallow with try/catch and null", "context": "Agent wrapped every fetch in try/catch, returned null on failure", "tags": ["error-handling"]}}
+{{"rule": "Let errors propagate - don't swallow with try/catch and null", "context": "Implementing API client layer. Agent wrapped every fetch call in try/catch blocks that swallowed errors and returned null, making debugging impossible when requests failed.", "tags": ["error-handling"]}}
 
 Agent set up Redux for settings page. Human says "just useState"
-{{"rule": "Use useState for local state - Redux is overkill for small features", "context": "Agent set up Redux for theme/notification preferences", "tags": ["react", "state"]}}
+{{"rule": "Use useState for local state - Redux is overkill for small features", "context": "Adding user preferences page with theme toggle and notification settings. Agent set up Redux store, actions, and reducers for state that only lives on one page.", "tags": ["react", "state"]}}
 </output_format>
 
 <skip_conditions>
@@ -109,6 +114,22 @@ Never include secrets. Describe generically: "uses OpenAI API" not the actual ke
 REMINDER: Output ONLY the JSON object. No other text.
 '''
 
+# Markers to detect our own extraction prompts (prevents infinite recursion)
+# Keep these in sync with EXTRACTION_PROMPT above
+EXTRACTION_PROMPT_MARKERS = [
+    'You extract reusable rules from human feedback',
+    '<human_message>',
+    '<similarity_check>'
+]
+
+
+def is_extraction_prompt(text: str) -> bool:
+    """Check if text is our own extraction prompt (prevents infinite recursion).
+    
+    Uses markers from EXTRACTION_PROMPT to detect recursive prompts.
+    """
+    return all(marker in text for marker in EXTRACTION_PROMPT_MARKERS)
+
 
 # =============================================================================
 # WORKER SETTINGS
@@ -116,6 +137,13 @@ REMINDER: Output ONLY the JSON object. No other text.
 
 # How often the worker polls for new items (seconds)
 POLL_INTERVAL = 5
+
+# Number of parallel extraction calls (concurrent claude -p processes)
+EXTRACTION_CONCURRENCY = 2
+
+# Model for extraction (sonnet is fast and cost-effective)
+# Options: sonnet, opus, haiku, opusplan, or full model name
+EXTRACTION_MODEL = "sonnet"
 
 # Delay between processing items (rate limiting, seconds)
 RATE_LIMIT = 2

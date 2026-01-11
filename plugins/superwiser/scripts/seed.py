@@ -7,13 +7,14 @@ and queues them for extraction with override_mode=TRUE (last writer wins).
 import gzip
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from db_utils import db_context
-from config import CONTEXT_MAX_LINES
-from transcript_utils import contains_secrets, filter_transcript_entry
+from config import CONTEXT_MAX_LINES, is_extraction_prompt
+from transcript_utils import contains_secrets, filter_transcript_entry, is_system_message
 
 
 def get_project_transcripts(project_path: str) -> list[Path]:
@@ -22,8 +23,8 @@ def get_project_transcripts(project_path: str) -> list[Path]:
     Transcripts are stored in ~/.claude/projects/{encoded-path}/
     where encoded-path is the project path with / replaced by -.
     """
-    # Encode: /root/fanwick -> -root-fanwick
-    encoded = project_path.lstrip('/').replace('/', '-')
+    # Encode: /root/fanwick -> -root-fanwick (leading dash preserved)
+    encoded = project_path.replace('/', '-')
     transcripts_dir = Path.home() / '.claude' / 'projects' / encoded
     
     if not transcripts_dir.exists():
@@ -35,6 +36,23 @@ def get_project_transcripts(project_path: str) -> list[Path]:
     
     # Sort by modification time (oldest first)
     return sorted(files, key=lambda f: f.stat().st_mtime)
+
+
+def get_transcript_stats(project_path: str) -> dict:
+    """Get statistics about available transcripts for a project.
+    
+    Returns dict with: count, oldest_date, newest_date
+    """
+    transcripts = get_project_transcripts(project_path)
+    
+    if not transcripts:
+        return {'count': 0, 'oldest_date': None, 'newest_date': None}
+    
+    # Get dates from first and last (already sorted oldest-first)
+    oldest = datetime.fromtimestamp(transcripts[0].stat().st_mtime).strftime('%Y-%m-%d')
+    newest = datetime.fromtimestamp(transcripts[-1].stat().st_mtime).strftime('%Y-%m-%d')
+    
+    return {'count': len(transcripts), 'oldest_date': oldest, 'newest_date': newest}
 
 
 def extract_prompts_with_context(transcript_path: Path) -> list[dict]:
@@ -69,11 +87,14 @@ def extract_prompts_with_context(transcript_path: Path) -> list[dict]:
         message = entry.get('message', {})
         content = message.get('content', '')
 
-        # Skip non-string content (tool results) and command prefixes
+        # Skip non-string content (tool results), commands, and system messages
         if not isinstance(content, str):
             continue
         stripped = content.strip()
-        if not stripped or stripped.startswith(('/', '<command-')) or contains_secrets(content):
+        if not stripped or stripped.startswith('/') or is_system_message(content) or contains_secrets(content):
+            continue
+        # Skip our own extraction prompts (prevents infinite recursion)
+        if is_extraction_prompt(content):
             continue
         
         # Build context from preceding entries
@@ -116,15 +137,40 @@ def extract_prompts_with_context(transcript_path: Path) -> list[dict]:
     return prompts
 
 
-def seed_project(project_path: str, db_path: str) -> dict:
-    """Queue all historical prompts for extraction with override_mode=TRUE.
+def seed_project(project_path: str, db_path: str, latest_n: int = None, after_date: str = None) -> dict:
+    """Queue historical prompts for extraction with override_mode=TRUE.
+
+    Args:
+        project_path: Path to the project
+        db_path: Path to the database
+        latest_n: If provided, only process the N most recent transcripts
+        after_date: If provided (ISO format YYYY-MM-DD), only process transcripts after this date
 
     Returns dict with queued count and transcript count.
     """
+    # Defensive: never seed from /tmp/superwiser (worker extraction directory)
+    if project_path.startswith('/tmp/superwiser'):
+        return {'queued': 0, 'transcripts': 0, 'message': 'Cannot seed from extraction directory'}
+
     transcripts = get_project_transcripts(project_path)
 
     if not transcripts:
         return {'queued': 0, 'transcripts': 0, 'message': 'No transcripts found'}
+
+    # Apply filters (mutually exclusive)
+    if latest_n is not None:
+        # Take the N most recent (transcripts are sorted oldest-first, so take from end)
+        transcripts = transcripts[-latest_n:] if latest_n < len(transcripts) else transcripts
+    elif after_date is not None:
+        # Filter to transcripts after the given date
+        try:
+            cutoff = datetime.strptime(after_date, '%Y-%m-%d').timestamp()
+            transcripts = [t for t in transcripts if t.stat().st_mtime >= cutoff]
+        except ValueError:
+            return {'queued': 0, 'transcripts': 0, 'error': f'Invalid date format: {after_date}. Use YYYY-MM-DD'}
+
+    if not transcripts:
+        return {'queued': 0, 'transcripts': 0, 'message': 'No transcripts match the filter criteria'}
 
     try:
         with db_context(db_path, timeout=30.0) as db:
