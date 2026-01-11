@@ -1,0 +1,18 @@
+{
+  "name": "superwiser-local",
+  "description": "Local development marketplace for superwiser",
+  "owner": {
+    "name": "Developer"
+  },
+  "plugins": [
+    {
+      "name": "superwiser",
+      "source": "./plugins/superwiser",
+      "description": "Extract and search human decisions from Claude Code sessions",
+      "version": "1.1.0",
+      "author": {
+        "name": "Developer"
+      }
+    }
+  ]
+}

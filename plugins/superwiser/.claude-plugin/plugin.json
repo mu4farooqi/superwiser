@@ -1,0 +1,10 @@
+{
+  "name": "superwiser",
+  "version": "1.2.2",
+  "description": "Extract and search human decisions from Claude Code sessions",
+  "author": {
+    "name": "User"
+  },
+  "commands": "./commands",
+  "mcpServers": "./.mcp.json"
+}
