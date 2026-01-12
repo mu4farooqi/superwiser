@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """MCP server for Superwiser - exposes search and context tools to Claude Code."""
 
+import fcntl
 import json
 import os
 import subprocess
@@ -12,9 +13,54 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from mcp.server.fastmcp import FastMCP
 from db_utils import db_context
-from search import search, format_results
+from paths import SUPERWISER_DIR, VENV_PYTHON, LOCKS_DIR, MARKERS_DIR, SEARCH_MARKER
 
 mcp = FastMCP("superwiser")
+
+# Pinned versions for reproducibility (must match session-init.py)
+SEARCH_DEPS = ["sentence-transformers==3.4.1", "sqlite-vec==0.1.6"]
+
+
+def ensure_search_deps() -> tuple[bool, str]:
+    """Lazily install search deps with locking using uv. Returns (success, error_msg)."""
+    LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+    MARKERS_DIR.mkdir(parents=True, exist_ok=True)
+
+    lock_file = LOCKS_DIR / "search_deps.lock"
+
+    # Fast path: already installed
+    if SEARCH_MARKER.exists():
+        return True, ""
+
+    # Acquire lock to serialize installs
+    with open(lock_file, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+
+        # Double-check after acquiring lock
+        if SEARCH_MARKER.exists():
+            return True, ""
+
+        try:
+            # Set cache location to avoid tmp issues
+            env = {**os.environ, "HF_HOME": str(SUPERWISER_DIR / "cache")}
+
+            # Use uv for faster, consistent installs
+            result = subprocess.run(
+                ["uv", "pip", "install", "-p", str(VENV_PYTHON), "-q"] + SEARCH_DEPS,
+                capture_output=True, text=True, timeout=120, env=env
+            )
+
+            if result.returncode != 0:
+                return False, f"uv pip install failed: {result.stderr[:200]}"
+
+            # Write success marker
+            SEARCH_MARKER.write_text("ok")
+            return True, ""
+
+        except subprocess.TimeoutExpired:
+            return False, "Install timed out (120s). Please retry."
+        except Exception as e:
+            return False, str(e)
 
 
 def get_db_path() -> str:
@@ -52,6 +98,14 @@ def search_rules(query: str, tags: str = "", context: str = "", limit: int = 5) 
         search_rules("testing", tags="python")
         search_rules("error handling", context="Setting up API error responses")
     """
+    # Lazy install search dependencies (sentence-transformers, sqlite-vec)
+    ok, err = ensure_search_deps()
+    if not ok:
+        return json.dumps({"error": f"Search deps not ready: {err}. Try again in a moment."})
+
+    # Now safe to import search module (needs sentence-transformers)
+    from search import search, format_results
+
     db_path = get_db_path()
 
     if not Path(db_path).exists():

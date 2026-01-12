@@ -2,8 +2,11 @@
   "mcpServers": {
     "superwiser": {
       "type": "stdio",
-      "command": "python3",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-server.py"]
+      "command": "bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-bootstrap.sh"],
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
     }
   }
 }

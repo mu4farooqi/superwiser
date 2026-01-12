@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Unified SessionStart hook - handles all session initialization:
-- Dependency installation
+- Dependency installation (using uv)
 - Worker daemon startup
 - Project registration
 - Database initialization
@@ -15,22 +15,21 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
+
 from ensure_init import is_recording_disabled, is_worker_running
 from db_utils import hook_output
+from paths import (
+    SUPERWISER_DIR, VENV_DIR, VENV_PYTHON,
+    PID_FILE, VERSION_FILE, LOG_FILE,
+    REGISTRY, STATE_FILE, MARKERS_DIR, SEARCH_MARKER
+)
 
-SUPERWISER_DIR = Path.home() / '.superwiser'
-VENV_DIR = SUPERWISER_DIR / 'venv'
-VENV_PYTHON = VENV_DIR / 'bin' / 'python'
-PID_FILE = SUPERWISER_DIR / 'worker.pid'
-VERSION_FILE = SUPERWISER_DIR / 'worker.version'
-LOG_FILE = SUPERWISER_DIR / 'worker.log'
-REGISTRY = SUPERWISER_DIR / 'projects.txt'
-STATE_FILE = SUPERWISER_DIR / 'install-state.json'
-
+# Packages to install for worker
+# Version pins should match mcp-server.py SEARCH_DEPS for consistency
 PACKAGES = [
     ('numpy', 'numpy'),
-    ('sentence_transformers', 'sentence-transformers'),
-    ('sqlite_vec', 'sqlite-vec'),
+    ('sentence_transformers', 'sentence-transformers==3.4.1'),
+    ('sqlite_vec', 'sqlite-vec==0.1.6'),
     ('mcp', 'mcp')
 ]
 VERSION = "1.3.0"
@@ -38,14 +37,21 @@ VERSION = "1.3.0"
 
 # ============== Dependency Installation ==============
 
-def is_installed(name: str) -> bool:
-    """Check if package is installed in venv."""
+def is_installed(pip_spec: str) -> bool:
+    """Check if package is installed in venv using uv pip show (no Python import).
+    
+    Accepts a pip spec (e.g., 'sentence-transformers==3.4.1') but only uses
+    the base name for the presence check.
+    """
     if not VENV_PYTHON.exists():
         return False
     try:
+        base = pip_spec.split('==')[0]
         result = subprocess.run(
-            [str(VENV_PYTHON), '-c', f'import {name}'],
-            capture_output=True, timeout=10
+            ['uv', 'pip', 'show', '-p', str(VENV_PYTHON), base],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
         )
         return result.returncode == 0
     except Exception:
@@ -64,64 +70,43 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
-def ensure_uv() -> bool:
-    """Ensure uv is installed."""
-    try:
-        subprocess.run(['uv', '--version'], check=True, capture_output=True, timeout=10)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        try:
-            print("Installing uv...", file=sys.stderr)
-            subprocess.run(
-                ['sh', '-c', 'curl -LsSf https://astral.sh/uv/install.sh | sh'],
-                check=True, capture_output=True, timeout=60
-            )
-            return True
-        except Exception:
-            return False
-
-
-def ensure_venv() -> bool:
-    """Ensure virtual environment exists."""
-    if VENV_PYTHON.exists():
-        return True
-    try:
-        SUPERWISER_DIR.mkdir(parents=True, exist_ok=True)
-        print("Creating virtual environment...", file=sys.stderr)
-        subprocess.run(['uv', 'venv', str(VENV_DIR)],
-                       check=True, capture_output=True, timeout=30)
-        return VENV_PYTHON.exists()
-    except Exception:
-        return False
-
-
 def install_pkg(pkg: str) -> bool:
+    """Install package using uv. Assumes uv and venv already exist (from bootstrap)."""
     try:
-        subprocess.run(['uv', 'pip', 'install', '-p', str(VENV_PYTHON), '-q', pkg],
-                       check=True, capture_output=True, timeout=120)
+        subprocess.run(
+            ['uv', 'pip', 'install', '-p', str(VENV_PYTHON), '-q', pkg],
+            check=True, capture_output=True, timeout=120
+        )
         return True
     except Exception:
         return False
 
 
 def install_dependencies() -> tuple[bool, str | None]:
-    """Install missing dependencies. Returns (success, message)."""
+    """Install missing dependencies. Returns (success, message).
+    
+    Assumes bootstrap has already:
+    1. Installed uv
+    2. Created the venv
+    3. Installed mcp package
+    """
     state = load_state()
 
     if state.get('version') == VERSION and state.get('status') == 'complete':
+        # Ensure search marker exists (for MCP lazy install coherence)
+        write_search_marker_if_installed()
         return True, None
 
-    missing = [(imp, pip) for imp, pip in PACKAGES if not is_installed(imp)]
+    # Check if venv exists (bootstrap should have created it)
+    if not VENV_PYTHON.exists():
+        return False, "**Superwiser**: Venv not found. Please restart the session."
+
+    missing = [(imp, pip) for imp, pip in PACKAGES if not is_installed(pip)]
 
     if not missing:
         save_state({'version': VERSION, 'status': 'complete', 'missing': []})
+        write_search_marker_if_installed()
         return True, None
-
-    if not ensure_uv():
-        return False, "**Superwiser**: Failed to install uv package manager."
-
-    if not ensure_venv():
-        return False, "**Superwiser**: Failed to create virtual environment."
 
     failed = []
     for imp, pip in missing:
@@ -140,7 +125,20 @@ uv pip install -p ~/.superwiser/venv/bin/python {' '.join(failed)}
         return False, msg
 
     save_state({'version': VERSION, 'status': 'complete', 'missing': []})
+    write_search_marker_if_installed()
     return True, None
+
+
+def write_search_marker_if_installed() -> None:
+    """Write search deps marker if sentence-transformers is installed.
+    
+    This ensures MCP lazy install skips redundant installs.
+    """
+    if SEARCH_MARKER.exists():
+        return
+    if is_installed('sentence-transformers==3.4.1') and is_installed('sqlite-vec==0.1.6'):
+        MARKERS_DIR.mkdir(parents=True, exist_ok=True)
+        SEARCH_MARKER.write_text("ok")
 
 
 # ============== Worker Management ==============
@@ -225,7 +223,8 @@ def init_project_db(cwd: str) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
-            [sys.executable, str(SCRIPT_DIR / 'init-db.py'), str(db_path)],
+            [str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable,
+             str(SCRIPT_DIR / 'init-db.py'), str(db_path)],
             capture_output=True, timeout=30
         )
     except Exception:
