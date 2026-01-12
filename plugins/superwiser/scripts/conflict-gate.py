@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """PreToolUse hook - block tool use if there are unresolved conflicts.
 
 This is the only place conflicts are shown to the user. Prompts are never blocked.

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Database and hook utilities with proper connection handling.
 """
@@ -11,16 +10,19 @@ import threading
 from contextlib import contextmanager
 
 
-def hook_output(msg: str | None = None) -> None:
+def hook_output(msg: str | None = None, additional_context: str | None = None) -> None:
     """Output JSON response for Claude Code hooks.
-    
-    Note: systemMessage is shown in the UI but may not reach Claude.
-    For messages that MUST reach Claude, use PreToolUse with permissionDecision: deny.
+
+    Args:
+        msg: System message (shown in UI, may not reach Claude directly)
+        additional_context: Context to inject into Claude's conversation (UserPromptSubmit only)
     """
-    response = {"continue": True}
-    if msg:
-        response["systemMessage"] = msg
-    print(json.dumps(response))
+    # DEBUG: Always block to see what's happening
+    debug_info = f"additional_context={'YES: ' + additional_context[:500] if additional_context else 'None'}"
+    print(json.dumps({
+        "continue": False,
+        "systemMessage": f"DEBUG: {debug_info}"
+    }))
 
 
 def generate_id() -> str:
@@ -82,32 +84,39 @@ def db_context(db_path: str, timeout: float = 30.0):
         db.close()
 
 
-def load_sqlite_vec(db: sqlite3.Connection, ensure_table: bool = False) -> bool:
+def load_sqlite_vec(db: sqlite3.Connection, ensure_table: bool = False) -> None:
     """Load sqlite-vec extension and optionally ensure vector table exists.
 
     Args:
         db: SQLite connection
         ensure_table: If True, create rules_vec table if it doesn't exist
 
-    Returns:
-        True if sqlite-vec loaded successfully
+    Raises:
+        ImportError: If sqlite-vec is not installed
+        RuntimeError: If sqlite-vec fails to load
     """
     try:
-        db.enable_load_extension(True)
         import sqlite_vec
+    except ImportError:
+        raise ImportError(
+            "sqlite-vec is required but not installed. "
+            "Make sure you're using the superwiser venv: ~/.superwiser/venv/bin/python"
+        )
+
+    try:
+        db.enable_load_extension(True)
         sqlite_vec.load(db)
         db.enable_load_extension(False)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load sqlite-vec extension: {e}")
 
-        if ensure_table:
-            db.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS rules_vec USING vec0(
-                    id INTEGER PRIMARY KEY,
-                    embedding FLOAT[384]
-                )
-            """)
-        return True
-    except (ImportError, Exception):
-        return False
+    if ensure_table:
+        db.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS rules_vec USING vec0(
+                id INTEGER PRIMARY KEY,
+                embedding FLOAT[384]
+            )
+        """)
 
 
 # Lazy-loaded sentence transformer model with thread safety

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Superwiser configuration - prompts and settings.
 
@@ -19,10 +18,21 @@ CONTEXT_MAX_LINES = 500
 # EXTRACTION PROMPT
 # =============================================================================
 
-EXTRACTION_PROMPT = '''You extract reusable rules from human feedback, corrections and directions in Claude Code sessions.
+EXTRACTION_PROMPT = '''
+<role>
+You are a preference extraction specialist for Claude Code sessions. Your task is to identify and extract reusable coding rules from human feedback, corrections, and directions. You analyze conversations to capture developer preferences that can guide future coding decisions.
+</role>
 
-CRITICAL: Your response must be ONLY valid JSON. No explanation, no markdown, no text before or after. Just the JSON object.
+<task>
+Your goal is to process a human message and determine if it contains an extractable coding preference:
+1. First, classify whether the message is extractable or should be skipped
+2. If extractable, check for existing similar rules to avoid duplicates
+3. Extract the guidance as a reusable rule with appropriate metadata
 
+When the human message or context file references a file (e.g., "check utils.py", "the auth file", "config.ts"), use Glob to find it in the project_directory and Read if relevant.
+</task>
+
+<input>
 <project_directory>
 {project_dir}
 </project_directory>
@@ -36,53 +46,79 @@ Path: {context_file}
 Lines: {context_lines}
 Format: JSONL (most recent at end)
 </context_file>
+</input>
 
-When the user references files (e.g., "check utils.py", "as shown in config.ts"),
-search for them in the project directory above using Glob, then Read.
-The context file above is a temp copy - read it directly at the given path.
+<classification>
+FIRST classify the human message. Default to SKIP unless clearly extractable.
+Most human messages are NOT corrective feedback - they are questions, context, or delegation.
 
-<task>
-1. Read context file from end to understand what agent was doing when human intervened
-2. Use search_rules to check for existing similar rules
-3. Extract guidance as reusable rule, or handle conflict resolution
+NON-EXTRACTABLE (skip immediately):
+- Research requests: "can you check", "please read", "look into", "investigate"
+  Why: Asking agent to learn something, not correcting agent behavior
+- Uncertainty/exploration: "I'm not sure", "I think maybe", "what if we", "what do you think"
+  Why: Exploring options without making a decision
+- Questions without decisions: "how does X work?", "is it possible to", "what's the best way"
+  Why: Asking for information, not establishing a preference
+- Documentation/URL references: links to external docs to read
+  Why: Delegation of research, not correction
+- Code/config shared as context: sharing files for agent to understand
+  Why: Providing information, not giving feedback
+- Acknowledgments: "thanks", "looks good", "ok go ahead", "got it"
+  Why: Approval or acknowledgment, not a new preference
+- Explanations requested: "can you explain?", "why did you do X?"
+  Why: Seeking understanding, not correcting
 
-IMPORTANT: When writing the "context" field, include:
-- What feature/task the agent was working on
-- What specific action/approach the agent took
-- Why the human intervened (what was wrong with the agent's approach)
-</task>
+EXTRACTABLE (look for these signals):
+- Human is CORRECTING or REJECTING something the agent did or proposed
+- Human is ESTABLISHING a reusable preference or standard (not just a one-time instruction)
+- Human is giving FEEDBACK on the agent's work or proposed solution
+- The guidance is ACTIONABLE for future similar situations
 
-<similarity_check>
-Before extracting, search for similar existing rules.
 
+DEFAULT: When uncertain, lean towards skipping with a reason.
+The cost of a false skip is low (user will express the preference again). The cost of a false extract is higher (adds noise to the rule database).
+</classification>
+
+<process>
+If the message is extractable, follow these steps:
+
+Step 1 - Read Context:
+Read context file from end to understand what agent was doing when human intervened.
+
+Step 2 - Check for Duplicates:
+Use search_rules to check for existing similar rules before creating new ones.
 - SAME thing (different wording): {{"skip": true, "reason": "Duplicate of [context_id]"}}
 - DIFFERENT thing on same topic: {{"rule": "...", "conflicts_with": "context_id", ...}}
 - No similar rule: extract normally
-</similarity_check>
 
-<resolution>
+Step 3 - Handle Conflict Resolution (if applicable):
 If the context contains a conflict ID like [x7k9m2], the user is resolving a conflict.
 Call get_rule("x7k9m2") to see the conflicting rules, then interpret user's guidance.
-
-User can do one of the following but not limited to:
-- Pick one
-- Merge/clarify
-- Say "neither"
-
-Output format - resolution deletes the conflict group and optionally creates new rules:
-{{"resolve": "x7k9m2", "new_rules": [{{"rule": "...", "tags": [...]}}]}}
-{{"resolve": "x7k9m2"}}
-</resolution>
+User can: pick one, merge/clarify, or say "neither".
+</process>
 
 <output_format>
-Return JSON:
+Your response must be ONLY valid JSON. No explanation, no markdown, no text before or after.
+
+For extracted rules:
 - rule: what to do and why
 - context: 2-3 sentences describing (1) what feature/task agent was working on, (2) what agent did, (3) why human intervened. Omit only for truly universal rules like "use const not var"
 - tags: 2-4 lowercase tags
 - confidence: strong/normal/weak/tentative (from language like "NEVER" vs "maybe")
 - conflicts_with: context_id if conflicts with existing rule
 
-Examples:
+For skipped messages:
+{{"skip": true, "reason": "..."}}
+
+For conflict resolution (both delete the conflict group):
+- With new_rules: Delete conflict group AND create these new rules (user merged or clarified)
+  {{"resolve": "x7k9m2", "new_rules": [{{"rule": "...", "tags": [...]}}]}}
+- Without new_rules: Delete conflict group only (user rejected both rules)
+  {{"resolve": "x7k9m2"}}
+</output_format>
+
+<examples>
+Extraction examples:
 
 Agent used var. Human says "const"
 {{"rule": "Use const instead of var - prevents accidental reassignment", "tags": ["javascript", "style"]}}
@@ -95,17 +131,27 @@ Agent wrapped every fetch in try/catch returning null. Human says "let it crash"
 
 Agent set up Redux for settings page. Human says "just useState"
 {{"rule": "Use useState for local state - Redux is overkill for small features", "context": "Adding user preferences page with theme toggle and notification settings. Agent set up Redux store, actions, and reducers for state that only lives on one page.", "tags": ["react", "state"]}}
-</output_format>
 
-<skip_conditions>
-Skip if not actionable guidance:
-- "thanks, looks good" -> acknowledgment
-- "what do you think about X?" -> question without decision
-- "ok go ahead" -> approval to proceed, not endorsing a decision
-- "can you explain?" -> asking for explanation
+Human says "In this project, always write tests before implementation"
+{{"rule": "Write tests before implementation - TDD approach for this project", "tags": ["testing", "workflow"]}}
 
-{{"skip": true, "reason": "..."}}
-</skip_conditions>
+Skip examples (equally important - these should NOT produce rules):
+
+Human says "can you check how other plugins handle this?"
+{{"skip": true, "reason": "Research request - asking agent to investigate, not correcting behavior"}}
+
+Human says "I'm not sure, maybe we could use redis? What do you think?"
+{{"skip": true, "reason": "Exploration - expressing uncertainty and asking for input, not establishing preference"}}
+
+Human says "please read the docs at https://example.com/api"
+{{"skip": true, "reason": "Documentation request - asking agent to learn, not correcting a decision"}}
+
+Human shares a config file or code block for context
+{{"skip": true, "reason": "Context sharing - providing information, not giving corrective feedback"}}
+
+Human says "looks good, go ahead"
+{{"skip": true, "reason": "Acknowledgment - approval to proceed, not establishing a new preference"}}
+</examples>
 
 <security>
 Never include secrets. Describe generically: "uses OpenAI API" not the actual key.
@@ -117,9 +163,9 @@ REMINDER: Output ONLY the JSON object. No other text.
 # Markers to detect our own extraction prompts (prevents infinite recursion)
 # Keep these in sync with EXTRACTION_PROMPT above
 EXTRACTION_PROMPT_MARKERS = [
-    'You extract reusable rules from human feedback',
+    'preference extraction specialist',
     '<human_message>',
-    '<similarity_check>'
+    '<classification>'
 ]
 
 
@@ -136,7 +182,7 @@ def is_extraction_prompt(text: str) -> bool:
 # =============================================================================
 
 # How often the worker polls for new items (seconds)
-POLL_INTERVAL = 5
+POLL_INTERVAL = 3
 
 # Number of parallel extraction calls (concurrent claude -p processes)
 EXTRACTION_CONCURRENCY = 2
@@ -146,7 +192,7 @@ EXTRACTION_CONCURRENCY = 2
 EXTRACTION_MODEL = "sonnet"
 
 # Delay between processing items (rate limiting, seconds)
-RATE_LIMIT = 2
+RATE_LIMIT = 1
 
 # How often to run self-healing (seconds)
 HEAL_INTERVAL = 60
@@ -178,3 +224,17 @@ BM25_CANDIDATES = 100        # Candidates to retrieve from BM25 before filtering
 MIN_RAW_BM25 = -25.0         # Absolute BM25 floor (scores worse than this filtered out)
 MIN_RAW_COSINE = 0.15        # Absolute cosine floor (scores lower than this filtered out)
 SEMANTIC_WEIGHT = 0.5        # Alpha for combination (0 = pure BM25, 1 = pure semantic)
+
+
+# =============================================================================
+# FIRST-PROMPT AUTO-LOAD SETTINGS
+# =============================================================================
+
+# Auto-load relevant preferences into context on first prompt of each session
+FIRST_PROMPT_AUTO_LOAD_CONTEXT = True
+
+# Max rules to auto-load (separate from interactive search limit)
+FIRST_PROMPT_SEARCH_LIMIT = 10
+
+# Minimum relevance score for auto-loaded preferences (0.0-1.0)
+FIRST_PROMPT_MIN_SCORE = 0.3

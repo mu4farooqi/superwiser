@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Seed rules from historical transcripts.
 
 Finds all transcript files for a project, extracts user prompts,

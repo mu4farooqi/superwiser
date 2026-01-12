@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Queue single user prompt - UserPromptSubmit hook.
 
 Queues user prompts for rule extraction. Does NOT block on conflicts;
@@ -12,9 +11,43 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from db_utils import db_context, hook_output
-from config import CONTEXT_MAX_LINES, is_extraction_prompt
+from config import (
+    CONTEXT_MAX_LINES, is_extraction_prompt, MIN_PROMPT_LENGTH,
+    FIRST_PROMPT_AUTO_LOAD_CONTEXT, FIRST_PROMPT_SEARCH_LIMIT
+)
+from paths import SESSION_MARKERS_DIR
 from ensure_init import ensure_ready
 from transcript_utils import contains_secrets, filter_transcript_entry, is_system_message
+
+
+def is_first_prompt(session_id: str) -> bool:
+    """Check if this is the first prompt for this session.
+
+    Creates a marker file on first call, returns False on subsequent calls.
+    """
+    if not session_id:
+        return False
+    marker = SESSION_MARKERS_DIR / f"{session_id}.searched"
+    if marker.exists():
+        return False
+    # Create marker
+    SESSION_MARKERS_DIR.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    return True
+
+
+def search_for_context(db_path: str, query: str) -> str | None:
+    """Search for relevant rules and format for context injection."""
+    if len(query.strip()) < MIN_PROMPT_LENGTH:
+        return None
+    if not Path(db_path).exists():
+        return None
+    try:
+        from search import search, format_for_context
+        results = search(db_path, query, top_k=FIRST_PROMPT_SEARCH_LIMIT)
+        return format_for_context(results) if results else None
+    except Exception:
+        return None
 
 
 def read_and_compress_context(transcript_path: str, max_lines: int) -> tuple[bytes | None, int]:
@@ -113,6 +146,11 @@ def main() -> None:
         hook_output()
         return
 
+    # First-prompt search: inject relevant preferences into context
+    injected_context = None
+    if FIRST_PROMPT_AUTO_LOAD_CONTEXT and is_first_prompt(session_id):
+        injected_context = search_for_context(db_path, user_prompt)
+
     context_blob, total_lines = read_and_compress_context(transcript_path, CONTEXT_MAX_LINES)
 
     try:
@@ -127,7 +165,7 @@ def main() -> None:
     except Exception:
         pass
 
-    hook_output()
+    hook_output(additional_context=injected_context)
 
 
 if __name__ == '__main__':

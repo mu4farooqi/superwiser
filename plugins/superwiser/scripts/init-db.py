@@ -1,12 +1,15 @@
-#!/usr/bin/env python3
 """Initialize context.db with v2 schema (context_graph + rules tables)."""
 import sqlite3
 import sys
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).parent
+sys.path.insert(0, str(SCRIPT_DIR))
+from db_utils import load_sqlite_vec
+
 
 def init_db(db_path: str):
-    """Initialize database with v2 schema. Vector table created later when sqlite-vec available."""
+    """Initialize database with v2 schema including vector table."""
     db = sqlite3.connect(db_path)
 
     db.executescript("""
@@ -98,22 +101,8 @@ def init_db(db_path: str):
         END;
     """)
 
-    # Try to create vector table if sqlite-vec is available
-    # If not, worker.py will create it later when dependencies are installed
-    try:
-        db.enable_load_extension(True)
-        import sqlite_vec
-        sqlite_vec.load(db)
-        db.enable_load_extension(False)
-
-        db.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS rules_vec USING vec0(
-                id INTEGER PRIMARY KEY,
-                embedding FLOAT[384]
-            )
-        """)
-    except (ImportError, Exception):
-        pass  # Vector table will be created by worker when deps available
+    # Create vector table (sqlite-vec is required)
+    load_sqlite_vec(db, ensure_table=True)
 
     db.commit()
     db.close()

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Unified SessionStart hook - handles all session initialization:
 - Dependency installation (using uv)
@@ -11,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
@@ -21,7 +21,8 @@ from db_utils import hook_output
 from paths import (
     SUPERWISER_DIR, VENV_DIR, VENV_PYTHON,
     PID_FILE, VERSION_FILE, LOG_FILE,
-    REGISTRY, STATE_FILE, MARKERS_DIR, SEARCH_MARKER
+    REGISTRY, STATE_FILE, MARKERS_DIR, SEARCH_MARKER,
+    SESSION_MARKERS_DIR
 )
 ENSURE_ENV = SCRIPT_DIR / 'ensure-env.sh'
 
@@ -260,6 +261,26 @@ def kill_orphan_workers() -> None:
     except Exception:
         pass
 
+
+# ============== Session Marker Cleanup ==============
+
+def cleanup_session_markers() -> None:
+    """Remove session markers older than 24 hours.
+
+    Session markers track which sessions have had their first-prompt search.
+    Old markers are cleaned up to avoid accumulating stale files.
+    """
+    if not SESSION_MARKERS_DIR.exists():
+        return
+    cutoff = time.time() - 86400  # 24 hours
+    for marker in SESSION_MARKERS_DIR.glob("*.searched"):
+        try:
+            if marker.stat().st_mtime < cutoff:
+                marker.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 # ============== Main ==============
 
 def main() -> None:
@@ -278,6 +299,7 @@ def main() -> None:
 
     register_project(cwd)
     init_project_db(cwd)
+    cleanup_session_markers()
 
     if recording_disabled:
         msg = "**Superwiser**: Recording paused. Use `/record` to resume."
@@ -286,7 +308,8 @@ def main() -> None:
     else:
         msg = "**Superwiser** active - learning your coding preferences."
 
-    hook_output(msg)
+
+    print(json.dumps({ "continue": True, "systemMessage": msg }))
 
 
 if __name__ == '__main__':

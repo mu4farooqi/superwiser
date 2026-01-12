@@ -4,15 +4,13 @@
 
 set -e
 
-SUPERWISER_DIR="$HOME/.superwiser"
-VENV="$SUPERWISER_DIR/venv"
 SCRIPT_DIR="$(dirname "$0")"
 
-# Ensure env (uv + venv)
+# Ensure env (uv + venv) - defines SUPERWISER_DIR and VENV
 source "$SCRIPT_DIR/ensure-env.sh"
 
-# Install mcp if missing (fast check via import)
-if ! "$VENV/bin/python" -c "import mcp" 2>/dev/null; then
+# Install mcp if missing
+if ! uv pip show -p "$VENV/bin/python" mcp >/dev/null 2>&1; then
     echo "Installing mcp..." >&2
     uv pip install -p "$VENV/bin/python" -q mcp || exit 1
 fi

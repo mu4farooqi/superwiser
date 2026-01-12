@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Global worker - polls all registered project queues.
 
 Handles v2 schema with context_graph + rules tables, conflict detection,
@@ -278,13 +277,13 @@ def mark_pending_conflict(db, context_id: str) -> None:
     db.execute("INSERT OR IGNORE INTO pending_conflicts (context_id) VALUES (?)", [context_id])
 
 
-def delete_context(db, context_id: str, vec_loaded: bool) -> None:
+def delete_context(db, context_id: str) -> None:
     """Delete a context and all its rules (for override mode)."""
     rule_ids = [r[0] for r in db.execute(
         "SELECT id FROM rules WHERE context_id = ?", [context_id]
     ).fetchall()]
 
-    if rule_ids and vec_loaded:
+    if rule_ids:
         placeholders = ','.join(['?'] * len(rule_ids))
         db.execute(f"DELETE FROM rules_vec WHERE id IN ({placeholders})", rule_ids)
 
@@ -306,7 +305,7 @@ def insert_embedding(db, rule_id: int, rule_text: str, context_text: str | None)
         pass
 
 
-def handle_resolution(db, result: dict, item: dict, vec_loaded: bool) -> tuple[str, str | None]:
+def handle_resolution(db, result: dict, item: dict) -> tuple[str, str | None]:
     """Handle conflict resolution: delete old group, optionally create new ones."""
     context_id = result["resolve"]
 
@@ -314,7 +313,7 @@ def handle_resolution(db, result: dict, item: dict, vec_loaded: bool) -> tuple[s
         "SELECT id FROM rules WHERE context_id = ?", [context_id]
     ).fetchall()]
 
-    if rule_ids and vec_loaded:
+    if rule_ids:
         placeholders = ','.join(['?'] * len(rule_ids))
         db.execute(f"DELETE FROM rules_vec WHERE id IN ({placeholders})", rule_ids)
 
@@ -328,8 +327,7 @@ def handle_resolution(db, result: dict, item: dict, vec_loaded: bool) -> tuple[s
         new_id = insert_context_with_retry(db, json.dumps(rule_data.get('tags', [])))
         rule_id = insert_rule(db, new_id, rule_data, item)
         created_rule_ids.append(rule_id)
-        if vec_loaded:
-            insert_embedding(db, rule_id, rule_data['rule'], rule_data.get('context'))
+        insert_embedding(db, rule_id, rule_data['rule'], rule_data.get('context'))
 
     # Mark new rules as having survived conflict resolution (importance bonus)
     if created_rule_ids:
@@ -347,9 +345,9 @@ def handle_resolution(db, result: dict, item: dict, vec_loaded: bool) -> tuple[s
     return "completed", None
 
 
-def process_single_rule(db, rule_data: dict, item: dict, vec_loaded: bool, override_mode: bool = False) -> str:
+def process_single_rule(db, rule_data: dict, item: dict, override_mode: bool = False) -> str:
     """Process a single rule - create new or add to existing context.
-    
+
     If override_mode=True and there's a conflict, the old rule is deleted
     and a new one is created (last writer wins, no user prompt needed).
     """
@@ -362,7 +360,7 @@ def process_single_rule(db, rule_data: dict, item: dict, vec_loaded: bool, overr
 
         if existing and override_mode:
             # Override mode: delete old context/rules, create new
-            delete_context(db, conflicts_with, vec_loaded)
+            delete_context(db, conflicts_with)
             context_id = insert_context_with_retry(db, json.dumps(tags))
             rule_id = insert_rule(db, context_id, rule_data, item)
             log(f"Override: replaced {conflicts_with} with {context_id}: {rule_text[:50]}...")
@@ -382,13 +380,12 @@ def process_single_rule(db, rule_data: dict, item: dict, vec_loaded: bool, overr
         rule_id = insert_rule(db, context_id, rule_data, item)
         log(f"Created new context {context_id}: {rule_text[:50]}...")
 
-    if vec_loaded:
-        insert_embedding(db, rule_id, rule_text, rule_data.get('context'))
+    insert_embedding(db, rule_id, rule_text, rule_data.get('context'))
 
     return context_id
 
 
-def process_extraction(db, result: dict, item: dict, vec_loaded: bool, override_mode: bool = False) -> tuple[str, str | None]:
+def process_extraction(db, result: dict, item: dict, override_mode: bool = False) -> tuple[str, str | None]:
     """Process extraction result - handles all output formats.
 
     If override_mode=True, conflicts are auto-resolved (last writer wins).
@@ -416,7 +413,7 @@ def process_extraction(db, result: dict, item: dict, vec_loaded: bool, override_
         return "skipped", reason
 
     if 'resolve' in result:
-        return handle_resolution(db, result, item, vec_loaded)
+        return handle_resolution(db, result, item)
 
     if 'rules' in result:
         rules = result['rules']
@@ -427,12 +424,12 @@ def process_extraction(db, result: dict, item: dict, vec_loaded: bool, override_
 
     for rule_data in rules:
         if rule_data.get('rule'):
-            process_single_rule(db, rule_data, item, vec_loaded, override_mode)
+            process_single_rule(db, rule_data, item, override_mode)
 
     return "completed", None
 
 
-def process_item(db, item: dict, vec_loaded: bool, db_path: str, project_dir: str) -> None:
+def process_item(db, item: dict, db_path: str, project_dir: str) -> None:
     """Process single queue item."""
     human_input = item['human_input']
     context_blob = item.get('context_blob')
@@ -449,7 +446,7 @@ def process_item(db, item: dict, vec_loaded: bool, db_path: str, project_dir: st
 
     result = extract_with_claude(human_input, context_blob, db_path, project_dir)
     override_mode = item.get('override_mode', False)
-    status, reason = process_extraction(db, result, item, vec_loaded, override_mode)
+    status, reason = process_extraction(db, result, item, override_mode)
 
     new_status = 'skipped' if status == "skipped" else 'completed'
     db.execute("UPDATE queue SET status = ?, reason = ? WHERE id = ?",
@@ -528,8 +525,8 @@ def process_single_item(item: dict) -> bool:
     
     try:
         db = get_db(db_path, timeout=10.0)
-        vec_loaded = load_sqlite_vec(db, ensure_table=True)
-        process_item(db, item, vec_loaded, db_path, project_path)
+        load_sqlite_vec(db, ensure_table=True)  # Required - raises if not available
+        process_item(db, item, db_path, project_path)
         db.close()
         return True
     except Exception as e:

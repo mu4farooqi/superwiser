@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Search rules using BM25 + hybrid scoring with pre-filtering (v2 schema)."""
 
 import sqlite3
@@ -12,7 +11,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from db_utils import load_sqlite_vec, get_model
 from config import (
     DEFAULT_SEARCH_LIMIT, BM25_CANDIDATES,
-    MIN_RAW_BM25, MIN_RAW_COSINE, SEMANTIC_WEIGHT
+    MIN_RAW_BM25, MIN_RAW_COSINE, SEMANTIC_WEIGHT,
+    FIRST_PROMPT_MIN_SCORE
 )
 
 
@@ -32,21 +32,31 @@ def minmax_normalize(scores: dict) -> dict:
     return {k: (v - min_s) / (max_s - min_s) for k, v in scores.items()}
 
 
-def search(db_path: str, query: str, top_k: int = DEFAULT_SEARCH_LIMIT) -> list:
+def search(db_path: str, query: str, top_k: int = DEFAULT_SEARCH_LIMIT, preferences_only: bool = False) -> list:
     """Two-stage hybrid search: BM25 retrieve + pre-filter + min-max normalize + combine."""
     import numpy as np
     from db_utils import db_context
 
     with db_context(db_path, timeout=10.0) as db:
-        use_embeddings = load_sqlite_vec(db)
+        load_sqlite_vec(db)  # Required - raises if not available
 
         # Stage 1a: BM25 retrieval (weights: rule=1.0, context=0.5, human_input=0.25)
+        # If preferences_only, filter to rules without context during retrieval
         try:
-            bm25_results = db.execute(f"""
-                SELECT rowid, bm25(rules_fts, 1.0, 0.5, 0.25) as score
-                FROM rules_fts WHERE rules_fts MATCH ?
-                ORDER BY score LIMIT {BM25_CANDIDATES}
-            """, [escape_fts5(query)]).fetchall()
+            if preferences_only:
+                bm25_results = db.execute(f"""
+                    SELECT fts.rowid, bm25(rules_fts, 1.0, 0.5, 0.25) as score
+                    FROM rules_fts fts
+                    JOIN rules r ON fts.rowid = r.id
+                    WHERE rules_fts MATCH ? AND (r.context IS NULL OR r.context = '')
+                    ORDER BY score LIMIT {BM25_CANDIDATES}
+                """, [escape_fts5(query)]).fetchall()
+            else:
+                bm25_results = db.execute(f"""
+                    SELECT rowid, bm25(rules_fts, 1.0, 0.5, 0.25) as score
+                    FROM rules_fts WHERE rules_fts MATCH ?
+                    ORDER BY score LIMIT {BM25_CANDIDATES}
+                """, [escape_fts5(query)]).fetchall()
         except sqlite3.OperationalError:
             return []
 
@@ -59,20 +69,17 @@ def search(db_path: str, query: str, top_k: int = DEFAULT_SEARCH_LIMIT) -> list:
 
         # Stage 1b: Compute semantic scores for BM25 candidates
         semantic_scores = {}
-        if use_embeddings and candidate_ids:
-            try:
-                query_emb = get_model().encode(query, normalize_embeddings=True)
-                placeholders = ','.join(['?'] * len(candidate_ids))
-                embeddings = db.execute(
-                    f"SELECT id, embedding FROM rules_vec WHERE id IN ({placeholders})",
-                    candidate_ids
-                ).fetchall()
+        if candidate_ids:
+            query_emb = get_model().encode(query, normalize_embeddings=True)
+            placeholders = ','.join(['?'] * len(candidate_ids))
+            embeddings = db.execute(
+                f"SELECT id, embedding FROM rules_vec WHERE id IN ({placeholders})",
+                candidate_ids
+            ).fetchall()
 
-                for row_id, emb_blob in embeddings:
-                    if emb_blob:
-                        semantic_scores[row_id] = float(np.dot(query_emb, np.frombuffer(emb_blob, dtype=np.float32)))
-            except Exception:
-                pass
+            for row_id, emb_blob in embeddings:
+                if emb_blob:
+                    semantic_scores[row_id] = float(np.dot(query_emb, np.frombuffer(emb_blob, dtype=np.float32)))
 
         # Stage 2: Pre-filter with absolute thresholds (OR logic)
         filtered_ids = [
@@ -84,20 +91,18 @@ def search(db_path: str, query: str, top_k: int = DEFAULT_SEARCH_LIMIT) -> list:
             return []
 
         # Stage 3: Min-max normalize both signals within survivors
-        filtered_bm25 = {rid: bm25_scores[rid] for rid in filtered_ids}
+        # Note: BM25 scores are negative (more negative = better), so we negate them
+        # before normalization so that higher normalized values = better matches
+        filtered_bm25 = {rid: -bm25_scores[rid] for rid in filtered_ids}
         filtered_semantic = {rid: semantic_scores.get(rid, 0) for rid in filtered_ids}
 
         norm_bm25 = minmax_normalize(filtered_bm25)
-        norm_semantic = minmax_normalize(filtered_semantic) if semantic_scores else {}
+        norm_semantic = minmax_normalize(filtered_semantic)
 
         # Stage 4: Weighted combination
         hybrid_scores = {}
         for rid in filtered_ids:
-            if norm_semantic:
-                hybrid_scores[rid] = (1 - SEMANTIC_WEIGHT) * norm_bm25[rid] + SEMANTIC_WEIGHT * norm_semantic.get(rid, 0)
-            else:
-                # No semantic embeddings available, use BM25 only
-                hybrid_scores[rid] = norm_bm25[rid]
+            hybrid_scores[rid] = (1 - SEMANTIC_WEIGHT) * norm_bm25[rid] + SEMANTIC_WEIGHT * norm_semantic.get(rid, 0)
 
         # Sort by hybrid score and apply limit
         final_ranked = sorted(hybrid_scores.items(), key=lambda x: -x[1])[:top_k]
@@ -196,6 +201,28 @@ def format_results(results: list) -> str:
             lines.append(f"   Context: {r['context']}")
         if r.get('tags'):
             lines.append(f"   Tags: {', '.join(r['tags'])}")
+    return '\n'.join(lines)
+
+
+def format_for_context(results: list) -> str | None:
+    """Format search results for context injection (concise format).
+
+    Filters by FIRST_PROMPT_MIN_SCORE and formats for stdout injection.
+    Returns None if no results pass the threshold.
+    """
+    filtered = [r for r in results if r.get('hybrid_score', 0) >= FIRST_PROMPT_MIN_SCORE]
+    if not filtered:
+        return None
+
+    lines = [f"**Superwiser** ({len(filtered)} relevant preferences loaded)"]
+    for r in filtered:
+        rule = r['rule']
+        context = r.get('context', '')
+        if context:
+            context = context[:77] + "..." if len(context) > 80 else context
+            lines.append(f"- {rule} (Context: {context})")
+        else:
+            lines.append(f"- {rule}")
     return '\n'.join(lines)
 
 

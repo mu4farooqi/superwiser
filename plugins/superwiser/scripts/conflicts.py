@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Shared conflict detection utilities."""
 
 from pathlib import Path

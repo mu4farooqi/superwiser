@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/session-init.py\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/hook-runner.sh\" session-init.py",
             "timeout": 300
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/queue-input.py\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/hook-runner.sh\" queue-input.py",
             "timeout": 5
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/conflict-gate.py\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/hook-runner.sh\" conflict-gate.py",
             "timeout": 3
           }
         ]

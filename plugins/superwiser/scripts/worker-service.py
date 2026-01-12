@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Worker service manager - stop and status commands.
 
 Start functionality is handled by session-init.py.

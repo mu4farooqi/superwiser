@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Lightweight init check - ensures superwiser is initialized.
 
 Call ensure_ready() at the start of any hook to auto-initialize if needed.

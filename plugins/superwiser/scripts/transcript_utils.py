@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Shared transcript parsing utilities.
 
 Used by queue-input.py (real-time capture) and seed.py (historical seeding).

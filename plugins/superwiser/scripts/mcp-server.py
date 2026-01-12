@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """MCP server for Superwiser - exposes search and context tools to Claude Code."""
 
 import fcntl
@@ -69,20 +68,19 @@ def get_db_path() -> str:
 
 
 @mcp.tool()
-def search_rules(query: str, context: str = "", limit: int = 5) -> str:
+def search_rules(query: str, context: str = "", limit: int = 5, preferences_only: bool = False) -> str:
     """Search user's recorded rules and coding decisions.
 
     WHEN TO USE:
     - Before important decisions (architecture, libraries, patterns, tech choices)
-    - When starting a new task to understand relevant preferences
     - When unsure about coding style, conventions, or approaches
-    - Periodically during longer tasks to stay aligned with user preferences
+    - When you need more specific preferences beyond what was auto-loaded
 
-    This helps you understand how the user likes things done - their coding style,
-    preferred libraries, architectural patterns, and past decisions.
+    Note: Relevant preferences are automatically loaded on the first prompt of each session.
+    Use this tool for deeper searches or when making specific decisions mid-session.
 
     CONFLICT HANDLING:
-    If results show "⚠️ CONFLICT [id]", you must ask user which rule to follow before proceeding.
+    If results show "\u26a0\ufe0f CONFLICT [id]", you must ask user which rule to follow before proceeding.
     Format your question as: "SuperWiser (Conflict) [id]: <describe the conflicting rules and ask which to follow>"
     After the user responds to resolve the conflict, you do not need to call any tools to resolve or delete rules. This is handled automatically in the background.
 
@@ -91,6 +89,7 @@ def search_rules(query: str, context: str = "", limit: int = 5) -> str:
         context: HIGHLY RECOMMENDED - describe what you're deciding for better results
                  (e.g., 'Setting up user authentication with JWT')
         limit: Maximum number of results to return (default: 5)
+        preferences_only: If True, only return universal rules without context (default: False)
 
     Examples:
         search_rules("database", context="Choosing database for user data")
@@ -109,15 +108,18 @@ def search_rules(query: str, context: str = "", limit: int = 5) -> str:
     if not Path(db_path).exists():
         return "No rules recorded yet. The user needs to use Claude Code for a while first."
 
-    try:
-        # Build search query from query + context (tags removed - they add noise to hybrid scoring)
-        search_query = query
-        if context:
-            search_query = f"{query} {context}"
+    # Combine query with context for better semantic matching
+    search_query = f"{query} {context}".strip() if context else query
 
-        results = search(db_path, search_query, limit)
+    try:
+        # Pass preferences_only to search for filtering during BM25 retrieval
+        results = search(db_path, search_query, limit, preferences_only=preferences_only)
+
         if not results:
-            return f"No rules found matching '{query}'."
+            msg = f"No rules found matching '{query}'."
+            if preferences_only:
+                msg += " (preferences only)"
+            return msg
         return format_results(results)
     except Exception as e:
         return f"Error searching rules: {e}"
@@ -200,13 +202,16 @@ def initialize() -> str:
 
 
 @mcp.tool()
-def list_rules(limit: int = 10, sort_by: str = "recent") -> str:
+def list_rules(limit: int = 10, sort_by: str = "recent", preferences_only: bool = False) -> str:
     """List captured rules with total count.
 
     WHEN TO USE:
-    - At the start of a session to understand user's key preferences
-    - Use sort_by="important" or "hits" to see most relevant rules
-    - Complements search_rules which is for specific decisions
+    - When user explicitly asks to see their rules
+    - When browsing rules by importance or recency
+    - Use preferences_only=True to see only universal rules (no context)
+
+    Note: Relevant preferences are automatically loaded on first prompt.
+    This tool is for explicit browsing, not routine session initialization.
 
     SORT OPTIONS:
     - "recent": Newest rules first (default)
@@ -226,6 +231,7 @@ def list_rules(limit: int = 10, sort_by: str = "recent") -> str:
     Args:
         limit: Maximum number of rules to show (default: 10)
         sort_by: Sort order - "recent" (default), "important", or "hits"
+        preferences_only: If True, only show universal rules without context (default: False)
 
     Returns:
         JSON with rules, total count, and importance info
@@ -236,8 +242,12 @@ def list_rules(limit: int = 10, sort_by: str = "recent") -> str:
 
     try:
         with db_context(db_path, timeout=5.0) as db:
-            # Get total count
-            total = db.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
+            # Build WHERE clause for preferences_only filter
+            where_clause = "WHERE (r.context IS NULL OR r.context = '')" if preferences_only else ""
+
+            # Get total count (respecting filter)
+            count_query = f"SELECT COUNT(*) FROM rules r {where_clause}"
+            total = db.execute(count_query).fetchone()[0]
 
             # Determine sort order
             order_clause = {
@@ -251,7 +261,7 @@ def list_rules(limit: int = 10, sort_by: str = "recent") -> str:
                 SELECT r.context_id, r.rule, r.context, r.confidence, date(r.created_at) as date,
                        COALESCE(r.importance_score, 0) as importance_score,
                        COALESCE(r.search_hit_count, 0) as search_hits
-                FROM rules r ORDER BY {order_clause} LIMIT ?
+                FROM rules r {where_clause} ORDER BY {order_clause} LIMIT ?
             """, [limit]).fetchall()
 
             return json.dumps({
@@ -264,7 +274,8 @@ def list_rules(limit: int = 10, sort_by: str = "recent") -> str:
                 ],
                 "total": total,
                 "showing": len(rules),
-                "sorted_by": sort_by
+                "sorted_by": sort_by,
+                "preferences_only": preferences_only
             }, indent=2)
     except Exception as e:
         return f"Error: {e}"

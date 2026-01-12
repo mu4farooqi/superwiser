@@ -28,3 +28,6 @@ REGISTRY = SUPERWISER_DIR / "projects.txt"
 # Install state
 STATE_FILE = SUPERWISER_DIR / "install-state.json"
 
+# Session markers for first-prompt tracking
+SESSION_MARKERS_DIR = SUPERWISER_DIR / "session_markers"
+
