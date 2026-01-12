@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Search rules using BM25 + RRF re-ranking (v2 schema)."""
+"""Search rules using BM25 + hybrid scoring with pre-filtering (v2 schema)."""
 
 import sqlite3
 import json
@@ -10,7 +10,10 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from db_utils import load_sqlite_vec, get_model
-from config import DEFAULT_SEARCH_LIMIT, BM25_RETRIEVAL_LIMIT, RRF_K
+from config import (
+    DEFAULT_SEARCH_LIMIT, BM25_CANDIDATES,
+    MIN_RAW_BM25, MIN_RAW_COSINE, SEMANTIC_WEIGHT
+)
 
 
 def escape_fts5(query: str) -> str:
@@ -19,20 +22,30 @@ def escape_fts5(query: str) -> str:
     return ' OR '.join(words) if words else '""'
 
 
+def minmax_normalize(scores: dict) -> dict:
+    """Normalize scores to [0, 1] using min-max within the set."""
+    if not scores:
+        return {}
+    min_s, max_s = min(scores.values()), max(scores.values())
+    if max_s == min_s:
+        return {k: 1.0 for k in scores}
+    return {k: (v - min_s) / (max_s - min_s) for k, v in scores.items()}
+
+
 def search(db_path: str, query: str, top_k: int = DEFAULT_SEARCH_LIMIT) -> list:
-    """BM25 retrieve + RRF re-rank on rules table."""
+    """Two-stage hybrid search: BM25 retrieve + pre-filter + min-max normalize + combine."""
     import numpy as np
     from db_utils import db_context
 
     with db_context(db_path, timeout=10.0) as db:
         use_embeddings = load_sqlite_vec(db)
 
-        # BM25 retrieval on rules_fts (weights: rule=1.0, context=0.5, human_input=0.25)
+        # Stage 1a: BM25 retrieval (weights: rule=1.0, context=0.5, human_input=0.25)
         try:
             bm25_results = db.execute(f"""
                 SELECT rowid, bm25(rules_fts, 1.0, 0.5, 0.25) as score
                 FROM rules_fts WHERE rules_fts MATCH ?
-                ORDER BY score LIMIT {BM25_RETRIEVAL_LIMIT}
+                ORDER BY score LIMIT {BM25_CANDIDATES}
             """, [escape_fts5(query)]).fetchall()
         except sqlite3.OperationalError:
             return []
@@ -40,11 +53,12 @@ def search(db_path: str, query: str, top_k: int = DEFAULT_SEARCH_LIMIT) -> list:
         if not bm25_results:
             return []
 
-        bm25_ranks = {row[0]: rank for rank, row in enumerate(bm25_results)}
-        candidate_ids = list(bm25_ranks.keys())
+        # Store actual BM25 scores (not just ranks)
+        bm25_scores = {row[0]: row[1] for row in bm25_results}
+        candidate_ids = list(bm25_scores.keys())
 
-        # Semantic re-ranking (if available)
-        semantic_ranks = {}
+        # Stage 1b: Compute semantic scores for BM25 candidates
+        semantic_scores = {}
         if use_embeddings and candidate_ids:
             try:
                 query_emb = get_model().encode(query, normalize_embeddings=True)
@@ -54,31 +68,46 @@ def search(db_path: str, query: str, top_k: int = DEFAULT_SEARCH_LIMIT) -> list:
                     candidate_ids
                 ).fetchall()
 
-                scores = {}
                 for row_id, emb_blob in embeddings:
                     if emb_blob:
-                        scores[row_id] = float(np.dot(query_emb, np.frombuffer(emb_blob, dtype=np.float32)))
-
-                if scores:
-                    semantic_ranks = {rid: rank for rank, (rid, _) in enumerate(sorted(scores.items(), key=lambda x: -x[1]))}
+                        semantic_scores[row_id] = float(np.dot(query_emb, np.frombuffer(emb_blob, dtype=np.float32)))
             except Exception:
                 pass
 
-        # RRF combination
-        rrf_scores = {}
-        for rid in candidate_ids:
-            rrf_scores[rid] = 1/(RRF_K + bm25_ranks.get(rid, 999))
-            if semantic_ranks:
-                rrf_scores[rid] += 1/(RRF_K + semantic_ranks.get(rid, 999))
+        # Stage 2: Pre-filter with absolute thresholds (OR logic)
+        filtered_ids = [
+            rid for rid in candidate_ids
+            if bm25_scores[rid] > MIN_RAW_BM25 or semantic_scores.get(rid, 0) > MIN_RAW_COSINE
+        ]
 
-        final_ranked = sorted(rrf_scores.items(), key=lambda x: -x[1])[:top_k]
+        if not filtered_ids:
+            return []
 
-        # Fetch results from rules table with context_id
+        # Stage 3: Min-max normalize both signals within survivors
+        filtered_bm25 = {rid: bm25_scores[rid] for rid in filtered_ids}
+        filtered_semantic = {rid: semantic_scores.get(rid, 0) for rid in filtered_ids}
+
+        norm_bm25 = minmax_normalize(filtered_bm25)
+        norm_semantic = minmax_normalize(filtered_semantic) if semantic_scores else {}
+
+        # Stage 4: Weighted combination
+        hybrid_scores = {}
+        for rid in filtered_ids:
+            if norm_semantic:
+                hybrid_scores[rid] = (1 - SEMANTIC_WEIGHT) * norm_bm25[rid] + SEMANTIC_WEIGHT * norm_semantic.get(rid, 0)
+            else:
+                # No semantic embeddings available, use BM25 only
+                hybrid_scores[rid] = norm_bm25[rid]
+
+        # Sort by hybrid score and apply limit
+        final_ranked = sorted(hybrid_scores.items(), key=lambda x: -x[1])[:top_k]
+
+        # Get final IDs (after threshold AND limit)
         top_ids = [rid for rid, _ in final_ranked]
         if not top_ids:
             return []
 
-        # Track search hits for importance scoring
+        # Track search hits ONLY for final results (after threshold + limit)
         try:
             placeholders = ','.join(['?'] * len(top_ids))
             db.execute(
@@ -89,6 +118,7 @@ def search(db_path: str, query: str, top_k: int = DEFAULT_SEARCH_LIMIT) -> list:
         except sqlite3.OperationalError:
             pass  # Columns may not exist yet (pre-migration)
 
+        # Fetch full results
         placeholders = ','.join(['?'] * len(top_ids))
         rows = {r[0]: r for r in db.execute(
             f"""SELECT r.id, r.context_id, r.rule, r.context, r.human_input,
@@ -127,7 +157,7 @@ def search(db_path: str, query: str, top_k: int = DEFAULT_SEARCH_LIMIT) -> list:
                     'tags': json.loads(r[7]) if r[7] else [],
                     'importance_score': r[8] if len(r) > 8 else 0,
                     'has_conflict': r[1] in conflict_contexts,
-                    'rrf_score': score
+                    'hybrid_score': score
                 })
 
         return results

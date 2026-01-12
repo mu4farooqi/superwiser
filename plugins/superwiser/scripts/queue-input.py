@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Queue single user prompt - UserPromptSubmit hook.
 
-Also checks for and displays pending conflicts to the user.
+Queues user prompts for rule extraction. Does NOT block on conflicts;
+conflict resolution is handled by PreToolUse hook (conflict-gate.py).
 """
 import gzip
 import json
@@ -12,7 +13,6 @@ SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from db_utils import db_context, hook_output
 from config import CONTEXT_MAX_LINES, is_extraction_prompt
-from conflicts import check_pending_conflicts
 from ensure_init import ensure_ready
 from transcript_utils import contains_secrets, filter_transcript_entry, is_system_message
 
@@ -97,26 +97,6 @@ def main() -> None:
         return
 
     db_path = str(Path(cwd).resolve() / '.claude' / 'superwiser' / 'context.db')
-
-    conflict_msg = check_pending_conflicts(db_path)
-    if conflict_msg:
-        # Block prompt and FORCE Claude to present conflict to user
-        result = {
-            "decision": "block",
-            "reason": f"""⚠️ STOP - CONFLICT RESOLUTION REQUIRED
-
-Present this conflict to the user:
-
-{conflict_msg}
-
-IMPORTANT: You MUST ask the user to act on this. After they respond:
-- Do NOT call any tools to resolve or delete rules
-- Do NOT try to process their response
-- Just continue with what you were originally doing
-- The conflict resolution is handled automatically in the background"""
-        }
-        print(json.dumps(result))
-        return
 
     prompt_stripped = user_prompt.strip()
     if not prompt_stripped:

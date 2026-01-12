@@ -173,8 +173,8 @@ MIN_PROMPT_LENGTH = 15
 # Default number of results to return
 DEFAULT_SEARCH_LIMIT = 10
 
-# BM25 retrieval limit before re-ranking
-BM25_RETRIEVAL_LIMIT = 500
-
-# RRF constant (standard is 60)
-RRF_K = 60
+# Hybrid search scoring (two-stage: pre-filter + min-max normalize + combine)
+BM25_CANDIDATES = 100        # Candidates to retrieve from BM25 before filtering
+MIN_RAW_BM25 = -25.0         # Absolute BM25 floor (scores worse than this filtered out)
+MIN_RAW_COSINE = 0.15        # Absolute cosine floor (scores lower than this filtered out)
+SEMANTIC_WEIGHT = 0.5        # Alpha for combination (0 = pure BM25, 1 = pure semantic)

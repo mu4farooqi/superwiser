@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PreToolUse hook - block tool use if there are unresolved conflicts.
 
-This is a backup for UserPromptSubmit - catches conflicts if the prompt hook didn't fire.
+This is the only place conflicts are shown to the user. Prompts are never blocked.
 The denial reason IS seen by Claude (unlike systemMessage).
 """
 import json
@@ -36,8 +36,7 @@ def main() -> None:
 
     db_path = str(Path(cwd).resolve() / '.claude' / 'superwiser' / 'context.db')
     
-    # Use check_pending_conflicts - only pops conflicts with shown=FALSE
-    # This ensures we don't double-block (UserPromptSubmit marks shown=TRUE)
+    # Check for pending conflicts (only pops conflicts with shown=FALSE)
     conflict_msg = check_pending_conflicts(db_path)
 
     if conflict_msg:

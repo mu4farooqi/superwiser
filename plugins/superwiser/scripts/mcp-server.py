@@ -69,7 +69,7 @@ def get_db_path() -> str:
 
 
 @mcp.tool()
-def search_rules(query: str, tags: str = "", context: str = "", limit: int = 5) -> str:
+def search_rules(query: str, context: str = "", limit: int = 5) -> str:
     """Search user's recorded rules and coding decisions.
 
     WHEN TO USE:
@@ -88,14 +88,12 @@ def search_rules(query: str, tags: str = "", context: str = "", limit: int = 5) 
 
     Args:
         query: What to search for (e.g., 'error handling', 'testing', 'database')
-        tags: Optional comma-separated tags to filter by (e.g., 'javascript,react')
         context: HIGHLY RECOMMENDED - describe what you're deciding for better results
                  (e.g., 'Setting up user authentication with JWT')
         limit: Maximum number of results to return (default: 5)
 
     Examples:
         search_rules("database", context="Choosing database for user data")
-        search_rules("testing", tags="python")
         search_rules("error handling", context="Setting up API error responses")
     """
     # Lazy install search dependencies (sentence-transformers, sqlite-vec)
@@ -112,20 +110,14 @@ def search_rules(query: str, tags: str = "", context: str = "", limit: int = 5) 
         return "No rules recorded yet. The user needs to use Claude Code for a while first."
 
     try:
-        # Build search query combining query, tags, and context
+        # Build search query from query + context (tags removed - they add noise to hybrid scoring)
         search_query = query
-        if tags:
-            # Add tag filters to search
-            tag_list = [t.strip() for t in tags.split(',') if t.strip()]
-            if tag_list:
-                search_query = f"{query} {' '.join(f'#{t}' for t in tag_list)}"
         if context:
-            # Append context for semantic matching
-            search_query = f"{search_query} {context}"
+            search_query = f"{query} {context}"
 
         results = search(db_path, search_query, limit)
         if not results:
-            return f"No rules found matching '{query}'." + (f" (tags: {tags})" if tags else "")
+            return f"No rules found matching '{query}'."
         return format_results(results)
     except Exception as e:
         return f"Error searching rules: {e}"
