@@ -37,6 +37,11 @@ When the human message or context file references a file (e.g., "check utils.py"
 {project_dir}
 </project_directory>
 
+<project_context_reference>
+Project context document: {project_dir}/.claude/superwiser/project-context.md
+Read this file if you need to understand project architecture, tech stack, conventions, or key abstractions to properly contextualize a rule. Not all extractions need this - simple preferences like "use const not var" don't require project context. If the file doesn't exist, proceed without it.
+</project_context_reference>
+
 <human_message>
 {human_input}
 </human_message>
@@ -98,7 +103,7 @@ User can: pick one, merge/clarify, or say "neither".
 </process>
 
 <output_format>
-Your response must be ONLY valid JSON. No explanation, no markdown, no text before or after.
+Respond with valid JSON only. Write your entire response as a single JSON object.
 
 For extracted rules:
 - rule: what to do and why
@@ -154,10 +159,12 @@ Human says "looks good, go ahead"
 </examples>
 
 <security>
-Never include secrets. Describe generically: "uses OpenAI API" not the actual key.
+Describe secrets generically: write "uses OpenAI API" rather than including actual keys.
 </security>
 
-REMINDER: Output ONLY the JSON object. No other text.
+<investigation>
+Read the context file and use search_rules before deciding. Base your classification on evidence from the conversation, not assumptions about what the human might mean.
+</investigation>
 '''
 
 # Markers to detect our own extraction prompts (prevents infinite recursion)
@@ -205,6 +212,81 @@ EXTRACTION_MAX_TURNS = 10
 
 
 # =============================================================================
+# PROJECT DISCOVERY SETTINGS
+# =============================================================================
+
+# How often to regenerate project context (days)
+DISCOVERY_INTERVAL = 14
+
+# Timeout for discovery (seconds) - 5 minutes to allow thorough exploration
+DISCOVERY_TIMEOUT = 300
+
+# Model for discovery (sonnet is good at exploration)
+DISCOVERY_MODEL = "sonnet"
+
+# Output file path (relative to project root)
+DISCOVERY_CONTEXT_FILE = ".claude/superwiser/project-context.md"
+
+# Discovery prompt - thorough project exploration
+# Follows Claude 4 best practices: explicit instructions, XML tags, positive framing, parallel tools
+DISCOVERY_PROMPT = '''
+<context>
+You are creating a project context document that will help a coding assistant write code that fits this project's patterns and conventions. This document will be referenced during preference extraction to properly contextualize coding rules.
+</context>
+
+<project_path>{project_dir}</project_path>
+
+<task>
+Explore the project thoroughly using Read, Glob, and Grep tools. Read multiple files in parallel when possible to build context faster.
+
+Follow this exploration sequence:
+1. Read dependency files (package.json, requirements.txt, Cargo.toml, go.mod, pyproject.toml) to identify tech stack
+2. Read README.md for project purpose (skip CLAUDE.md to avoid duplication)
+3. Use Glob to list top-level directories and identify structure
+4. Read 2-3 representative source files to identify patterns and conventions
+5. Check for build/test configuration (.github/workflows, Makefile, jest.config, pytest.ini)
+</task>
+
+<output_format>
+Write your response as clean markdown prose. Use the exact structure below, replacing bracketed placeholders with discovered information.
+
+# Project Context: [folder name from {project_dir}]
+Generated: [today's date as YYYY-MM-DD]
+
+## Overview
+[1-2 sentences describing what this project does]
+
+## Tech Stack
+- Language: [primary language and version if detectable]
+- Framework: [main framework if any]
+- Key dependencies: [5-10 most important dependencies]
+
+## Architecture
+[Describe directory structure and what each key directory contains]
+
+## Key Patterns
+[Describe common patterns: error handling approach, state management, abstractions used]
+
+## Conventions
+[Describe naming conventions (snake_case/camelCase), file organization, code style]
+
+## Build/Test
+[List commands to build, run, and test - note any Makefile targets or npm scripts]
+
+## Notes
+[Any other context relevant for coding assistance]
+</output_format>
+
+<guidelines>
+- Keep the document under 1500 words
+- Focus on actionable information that helps write code matching project style
+- Write in clear prose, using bullet points only for discrete lists
+- If you cannot determine something, write "Unknown" rather than guessing
+</guidelines>
+'''
+
+
+# =============================================================================
 # QUEUE SETTINGS
 # =============================================================================
 
@@ -227,14 +309,201 @@ SEMANTIC_WEIGHT = 0.5        # Alpha for combination (0 = pure BM25, 1 = pure se
 
 
 # =============================================================================
-# FIRST-PROMPT AUTO-LOAD SETTINGS
+# PREFERENCE LOADING SETTINGS (for load_preferences tool / skill)
 # =============================================================================
 
-# Auto-load relevant preferences into context on first prompt of each session
-FIRST_PROMPT_AUTO_LOAD_CONTEXT = True
+# Max global preferences to load (most important rules, ordered by importance_score)
+PREFERENCE_GLOBAL_LIMIT = 5
 
-# Max rules to auto-load (separate from interactive search limit)
-FIRST_PROMPT_SEARCH_LIMIT = 10
+# Max contextual preferences to load (task-specific semantic matches)
+PREFERENCE_CONTEXTUAL_LIMIT = 5
 
-# Minimum relevance score for auto-loaded preferences (0.0-1.0)
-FIRST_PROMPT_MIN_SCORE = 0.3
+# Minimum score threshold for contextual matches (0.0-1.0)
+PREFERENCE_MIN_SCORE = 0.3
+
+
+# =============================================================================
+# CONFIGURABLE SETTINGS SYSTEM
+# =============================================================================
+
+import json
+from pathlib import Path
+
+# Global config location
+CONFIG_DIR = Path.home() / '.config' / 'superwiser'
+CONFIG_FILE = CONFIG_DIR / 'config.json'
+
+# Metadata for user-configurable settings
+# Each entry: (default_value, type, description, validation_info)
+CONFIGURABLE_SETTINGS = {
+    'extraction_model': {
+        'default': 'sonnet',
+        'type': 'enum',
+        'options': ['sonnet', 'opus', 'haiku'],
+        'description': 'Model for preference extraction (sonnet=balanced, opus=quality, haiku=fast/cheap)'
+    },
+    'extraction_concurrency': {
+        'default': 2,
+        'type': 'int',
+        'min': 1,
+        'max': 10,
+        'description': 'Number of parallel extraction workers (higher = faster but more API cost)'
+    },
+    'preference_global_limit': {
+        'default': 5,
+        'type': 'int',
+        'min': 1,
+        'max': 20,
+        'description': 'Max global preferences to load when using /superwiser skill'
+    },
+    'preference_contextual_limit': {
+        'default': 5,
+        'type': 'int',
+        'min': 1,
+        'max': 20,
+        'description': 'Max task-specific preferences to load'
+    },
+    'preference_min_score': {
+        'default': 0.3,
+        'type': 'float',
+        'min': 0.0,
+        'max': 1.0,
+        'description': 'Minimum similarity score for contextual preference matches (0.0-1.0)'
+    },
+    'default_search_limit': {
+        'default': 10,
+        'type': 'int',
+        'min': 1,
+        'max': 50,
+        'description': 'Default number of results for search queries'
+    },
+    'context_max_lines': {
+        'default': 500,
+        'type': 'int',
+        'min': 100,
+        'max': 2000,
+        'description': 'Max transcript lines to capture for context (500 ≈ 50-80 exchanges)'
+    },
+    'min_prompt_length': {
+        'default': 15,
+        'type': 'int',
+        'min': 5,
+        'max': 100,
+        'description': 'Minimum prompt length to process (filters trivial inputs)'
+    },
+    'semantic_weight': {
+        'default': 0.5,
+        'type': 'float',
+        'min': 0.0,
+        'max': 1.0,
+        'description': 'Hybrid search balance (0.0=pure keyword, 1.0=pure semantic)'
+    },
+    'discovery_interval': {
+        'default': 14,
+        'type': 'int',
+        'min': 1,
+        'max': 90,
+        'description': 'Days between project context regeneration (14 = every 2 weeks)'
+    },
+    'discovery_timeout': {
+        'default': 300,
+        'type': 'int',
+        'min': 60,
+        'max': 600,
+        'description': 'Timeout in seconds for project discovery (300 = 5 minutes)'
+    },
+    'discovery_model': {
+        'default': 'sonnet',
+        'type': 'enum',
+        'options': ['sonnet', 'opus', 'haiku'],
+        'description': 'Model for project discovery (sonnet=balanced exploration)'
+    }
+}
+
+
+def get_runtime_config() -> dict:
+    """Load config from file, merged with defaults.
+
+    Returns dict with all configurable settings, using saved values
+    where available and defaults otherwise.
+    """
+    config = {key: meta['default'] for key, meta in CONFIGURABLE_SETTINGS.items()}
+
+    if CONFIG_FILE.exists():
+        try:
+            saved = json.loads(CONFIG_FILE.read_text())
+            # Only use keys that are valid configurable settings
+            for key, value in saved.items():
+                if key in CONFIGURABLE_SETTINGS:
+                    config[key] = value
+        except (json.JSONDecodeError, OSError):
+            pass  # Use defaults on error
+
+    return config
+
+
+def validate_config_value(key: str, value) -> tuple[bool, str]:
+    """Validate a config value against its metadata. Returns (is_valid, error_message)."""
+    if key not in CONFIGURABLE_SETTINGS:
+        return False, f"Unknown setting: {key}. Valid: {', '.join(CONFIGURABLE_SETTINGS.keys())}"
+
+    meta = CONFIGURABLE_SETTINGS[key]
+
+    if meta['type'] == 'enum':
+        if value not in meta['options']:
+            return False, f"Invalid value for {key}. Must be one of: {', '.join(meta['options'])}"
+
+    elif meta['type'] in ('int', 'float'):
+        try:
+            num = int(value) if meta['type'] == 'int' else float(value)
+            if not (meta['min'] <= num <= meta['max']):
+                return False, f"Value for {key} must be between {meta['min']} and {meta['max']}"
+        except (ValueError, TypeError):
+            return False, f"Value for {key} must be {'an integer' if meta['type'] == 'int' else 'a number'}"
+
+    return True, ""
+
+
+def save_config(key: str, value) -> tuple[bool, str]:
+    """Save a single config value.
+
+    Returns (success, message).
+    """
+    # Validate first
+    is_valid, error = validate_config_value(key, value)
+    if not is_valid:
+        return False, error
+
+    # Convert to proper type
+    meta = CONFIGURABLE_SETTINGS[key]
+    if meta['type'] == 'int':
+        value = int(value)
+    elif meta['type'] == 'float':
+        value = float(value)
+
+    # Load existing config
+    config = {}
+    if CONFIG_FILE.exists():
+        try:
+            config = json.loads(CONFIG_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Update and save
+    config[key] = value
+
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps(config, indent=2))
+        return True, f"Set {key} = {value}"
+    except OSError as e:
+        return False, f"Failed to save config: {e}"
+
+
+def get_config_with_metadata() -> dict:
+    """Get all config settings with metadata for display."""
+    current = get_runtime_config()
+    return {
+        key: {**meta, 'value': current[key]}
+        for key, meta in CONFIGURABLE_SETTINGS.items()
+    }

@@ -75,6 +75,24 @@ def init_db(db_path: str):
 
         CREATE INDEX IF NOT EXISTS idx_pending_shown ON pending_conflicts(shown, created_at);
 
+        -- Token usage tracking for daily/weekly stats
+        CREATE TABLE IF NOT EXISTS token_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation TEXT NOT NULL,  -- 'discovery' or 'extraction'
+            project_path TEXT,
+            model TEXT,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            cache_creation_tokens INTEGER DEFAULT 0,
+            cache_read_tokens INTEGER DEFAULT 0,
+            total_cost_usd REAL DEFAULT 0,
+            duration_ms INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_token_usage_date ON token_usage(created_at);
+        CREATE INDEX IF NOT EXISTS idx_token_usage_operation ON token_usage(operation, created_at);
+
         -- FTS for rules (primary search target)
         CREATE VIRTUAL TABLE IF NOT EXISTS rules_fts USING fts5(
             rule, context, human_input,

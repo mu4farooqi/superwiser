@@ -10,6 +10,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -25,11 +26,13 @@ def log(msg: str) -> None:
 
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
-from db_utils import get_db, load_sqlite_vec, generate_embedding, generate_id, insert_context_with_retry
+from db_utils import get_db, load_sqlite_vec, generate_embedding, generate_id, insert_context_with_retry, log_token_usage
 from config import (
     EXTRACTION_PROMPT, POLL_INTERVAL, RATE_LIMIT, HEAL_INTERVAL,
-    EXTRACTION_TIMEOUT, EXTRACTION_MAX_TURNS, MIN_PROMPT_LENGTH,
-    EXTRACTION_CONCURRENCY, EXTRACTION_MODEL
+    EXTRACTION_TIMEOUT, EXTRACTION_MAX_TURNS,
+    DISCOVERY_PROMPT, DISCOVERY_INTERVAL, DISCOVERY_TIMEOUT, DISCOVERY_MODEL,
+    DISCOVERY_CONTEXT_FILE,
+    get_runtime_config  # Dynamic config loading
 )
 from paths import SUPERWISER_DIR, REGISTRY
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -57,7 +60,7 @@ def setup_project_permissions(project_dirs: list[str]) -> None:
     """Generate permission settings for project file access.
     
     Creates .claude/settings.json in /tmp/superwiser with allow/deny rules
-    for Read, Glob, and Grep access to registered project directories.
+    for Read, Glob, Grep, and Bash access to registered project directories.
     """
     settings_file = TEMP_CLAUDE / 'settings.json'
     
@@ -66,16 +69,32 @@ def setup_project_permissions(project_dirs: list[str]) -> None:
         allow_rules.extend([
             f"Read({project}/**)",
             f"Glob({project}/**)",
-            f"Grep({project}/**)"
+            f"Grep({project}/**)",
+            f"Bash(cat {project}/**)",
+            f"Bash(head {project}/**)",
+            f"Bash(tail {project}/**)",
+            f"Bash(ls {project}/**)",
+            f"Bash(find {project}/**)",
+            f"Bash(wc {project}/**)",
+            f"Bash(file {project}/**)",
         ])
     
+    # Also allow some read-only system commands for discovery
+    allow_rules.extend([
+        "Bash(which *)",
+        "Bash(echo *)",
+        "Bash(pwd)",
+        "Bash(date)",
+    ])
+    
+    # Deny rules for sensitive files (Bash commands not needed - only allowed ones work)
     deny_rules = [
         "Read(**/.env)", "Read(**/.env.*)",
         "Read(**/.git/**)", "Read(**/.ssh/**)",
         "Read(**/id_rsa*)", "Read(**/id_ed25519*)",
         "Read(**/.aws/**)", "Read(**/credentials)",
         "Read(**/secrets/**)", "Read(**/.netrc)",
-        "Glob(**/.git/**)", "Grep(**/.git/**)"
+        "Glob(**/.git/**)", "Grep(**/.git/**)",
     ]
     
     settings = {"permissions": {"allow": allow_rules, "deny": deny_rules}}
@@ -132,6 +151,151 @@ def context_has_conflict_id(context_text: str | None, check_lines: int = 5) -> b
     return bool(re.search(r'\[[a-z0-9]{6}\]', recent))
 
 
+# =============================================================================
+# PROJECT DISCOVERY
+# =============================================================================
+
+# Track discovery in progress to prevent concurrent runs (thread-safe)
+_discovery_lock = threading.Lock()
+_discovery_in_progress: set[str] = set()
+
+
+def check_discovery_needed(project_path: str, config: dict = None) -> bool:
+    """Check if project needs context discovery (missing or stale).
+    
+    Returns True if:
+    - project-context.md doesn't exist
+    - project-context.md is older than discovery_interval days
+    """
+    if config is None:
+        config = get_runtime_config()
+    
+    interval_days = config.get('discovery_interval', DISCOVERY_INTERVAL)
+    context_file = Path(project_path) / DISCOVERY_CONTEXT_FILE
+    
+    if not context_file.exists():
+        return True
+    
+    try:
+        age_days = (time.time() - context_file.stat().st_mtime) / 86400
+        return age_days > interval_days
+    except Exception:
+        return True
+
+
+def run_project_discovery(project_path: str, config: dict = None) -> bool:
+    """Run project discovery to generate project-context.md.
+
+    Uses Claude with Read/Glob/Grep tools to explore the project
+    and generate a context document. Thread-safe - prevents concurrent
+    discovery for the same project.
+
+    Returns True if discovery succeeded, False otherwise.
+    """
+    # Thread-safe check and acquire
+    with _discovery_lock:
+        if project_path in _discovery_in_progress:
+            return False
+        _discovery_in_progress.add(project_path)
+
+    try:
+        if config is None:
+            config = get_runtime_config()
+
+        discovery_model = config.get('discovery_model', DISCOVERY_MODEL)
+        discovery_timeout = config.get('discovery_timeout', DISCOVERY_TIMEOUT)
+
+        log(f"Starting project discovery for {project_path}")
+
+        # Prepare output path
+        context_file = Path(project_path) / DISCOVERY_CONTEXT_FILE
+        context_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Format the discovery prompt
+        prompt = DISCOVERY_PROMPT.format(
+            project_dir=project_path
+        )
+
+        # Run claude -p with read-only tools
+        # Run from /tmp/superwiser to avoid triggering project hooks
+        # Use --max-turns 50 as safety limit (prevents runaway API costs)
+        result = subprocess.run(
+            ['claude', '-p', prompt, '--output-format', 'json',
+             '--model', discovery_model,
+             '--max-turns', '50',
+             '--allowedTools', 'Read,Glob,Grep,Bash'],
+            capture_output=True, text=True,
+            timeout=discovery_timeout,
+            cwd=str(TEMP_BASE)
+        )
+
+        if result.returncode != 0:
+            log(f"Discovery failed for {project_path}: exit code {result.returncode}")
+            return False
+
+        # Parse the JSON output and extract markdown content
+        try:
+            parsed = json.loads(result.stdout)
+            content = extract_discovery_content(parsed)
+
+            # Log token usage
+            db_path = str(Path(project_path) / '.claude' / 'superwiser' / 'context.db')
+            log_token_usage(db_path, 'discovery', parsed, project_path, discovery_model)
+
+            if not content or len(content) < 100:
+                log(f"Discovery for {project_path} produced insufficient content")
+                return False
+
+            # Write the context file
+            context_file.write_text(content)
+            log(f"Discovery completed for {project_path}: wrote {len(content)} bytes")
+            return True
+
+        except json.JSONDecodeError as e:
+            log(f"Discovery for {project_path} returned invalid JSON: {e}")
+            return False
+
+    except subprocess.TimeoutExpired:
+        log(f"Discovery for {project_path} timed out after {discovery_timeout}s")
+        return False
+    except Exception as e:
+        log(f"Discovery error for {project_path}: {type(e).__name__}: {str(e)[:100]}")
+        return False
+    finally:
+        with _discovery_lock:
+            _discovery_in_progress.discard(project_path)
+
+
+def extract_discovery_content(parsed: dict) -> str:
+    """Extract markdown content from Claude's JSON response.
+
+    Handles various response formats and strips markdown code fences.
+    """
+    if parsed.get('type') == 'result':
+        if parsed.get('subtype') == 'error_max_turns':
+            return ''
+        content = parsed.get('result', '')
+    else:
+        content = parsed.get('result', str(parsed))
+
+    # Unwrap if still a dict
+    if isinstance(content, dict):
+        content = content.get('result', str(content))
+
+    if not isinstance(content, str):
+        content = str(content)
+
+    # Strip markdown code fences if present
+    content = content.strip()
+    if content.startswith('```'):
+        # Remove opening fence (```markdown or ```)
+        content = re.sub(r'^```(?:markdown|md)?\n?', '', content)
+        # Remove closing fence
+        content = re.sub(r'\n?```$', '', content)
+
+    return content.strip()
+
+
 def extract_json_from_response(text: str) -> str:
     """Extract JSON from Claude's response, handling various formats.
     
@@ -160,12 +324,16 @@ def extract_json_from_response(text: str) -> str:
     return text
 
 
-def extract_with_claude(human_input: str, context_blob: bytes | None, db_path: str, project_dir: str) -> dict:
+def extract_with_claude(human_input: str, context_blob: bytes | None, db_path: str, project_dir: str, extraction_model: str = None) -> dict:
     """Extract preference/decision using Claude with Read/Glob/Grep tools and MCP search."""
     ensure_temp_dirs()
     context_text = decompress_context(context_blob)
     context_file = None
     mcp_config_file = None
+
+    # Use provided model or get from config
+    if extraction_model is None:
+        extraction_model = get_runtime_config().get('extraction_model', 'sonnet')
 
     try:
         if context_text:
@@ -201,7 +369,7 @@ def extract_with_claude(human_input: str, context_blob: bytes | None, db_path: s
         # Run from /tmp/superwiser to avoid triggering project hooks and auto-cleanup history
         result = subprocess.run(
             ['claude', '-p', prompt, '--output-format', 'json',
-             '--model', EXTRACTION_MODEL,
+             '--model', extraction_model,
              '--max-turns', str(EXTRACTION_MAX_TURNS),
              '--allowedTools', 'Read,Glob,Grep,mcp__superwiser__search_rules,mcp__superwiser__get_rule',
              '--mcp-config', mcp_config_file],
@@ -215,6 +383,9 @@ def extract_with_claude(human_input: str, context_blob: bytes | None, db_path: s
             return {'skip': True, 'reason': reason}
 
         parsed = json.loads(result.stdout)
+
+        # Log token usage from the full response before extracting inner result
+        log_token_usage(db_path, 'extraction', parsed, project_dir, extraction_model)
 
         if parsed.get('type') == 'result':
             if parsed.get('subtype') == 'error_max_turns':
@@ -429,12 +600,16 @@ def process_extraction(db, result: dict, item: dict, override_mode: bool = False
     return "completed", None
 
 
-def process_item(db, item: dict, db_path: str, project_dir: str) -> None:
+def process_item(db, item: dict, db_path: str, project_dir: str, config: dict = None) -> None:
     """Process single queue item."""
+    if config is None:
+        config = get_runtime_config()
+
     human_input = item['human_input']
     context_blob = item.get('context_blob')
+    min_prompt_length = config.get('min_prompt_length', 15)
 
-    if len(human_input.strip()) < MIN_PROMPT_LENGTH:
+    if len(human_input.strip()) < min_prompt_length:
         context_text = decompress_context(context_blob)
         if not context_has_conflict_id(context_text):
             reason = "Short prompt, no conflict in context"
@@ -444,7 +619,8 @@ def process_item(db, item: dict, db_path: str, project_dir: str) -> None:
             log(f"Skipped: {reason}")
             return
 
-    result = extract_with_claude(human_input, context_blob, db_path, project_dir)
+    extraction_model = config.get('extraction_model', 'sonnet')
+    result = extract_with_claude(human_input, context_blob, db_path, project_dir, extraction_model)
     override_mode = item.get('override_mode', False)
     status, reason = process_extraction(db, result, item, override_mode)
 
@@ -518,15 +694,15 @@ def fetch_pending_items(project_path: str, limit: int) -> list[dict]:
         return []
 
 
-def process_single_item(item: dict) -> bool:
+def process_single_item(item: dict, config: dict = None) -> bool:
     """Process a single queue item. Called by thread pool."""
     db_path = item['db_path']
     project_path = item['project_path']
-    
+
     try:
         db = get_db(db_path, timeout=10.0)
         load_sqlite_vec(db, ensure_table=True)  # Required - raises if not available
-        process_item(db, item, db_path, project_path)
+        process_item(db, item, db_path, project_path, config)
         db.close()
         return True
     except Exception as e:
@@ -543,12 +719,12 @@ def process_single_item(item: dict) -> bool:
         return False
 
 
-def process_project_queue(project_path: str) -> bool:
+def process_project_queue(project_path: str, config: dict = None) -> bool:
     """Legacy single-item processing. Used when concurrency=1."""
     items = fetch_pending_items(project_path, 1)
     if not items:
         return False
-    return process_single_item(items[0])
+    return process_single_item(items[0], config)
 
 
 def compute_importance_score(
@@ -720,6 +896,10 @@ def worker_loop() -> None:
         log(f"Warning: Missing dependencies: {missing}")
         log("Items will be deferred until dependencies are installed.")
 
+    # Track config for change detection
+    prev_concurrency = None
+    prev_model = None
+
     while running:
         self_heal()
 
@@ -728,35 +908,73 @@ def worker_loop() -> None:
             time.sleep(POLL_INTERVAL)
             continue
 
+        # Read config each cycle so changes take effect dynamically
+        config = get_runtime_config()
+        extraction_concurrency = config.get('extraction_concurrency', 2)
+        extraction_model = config.get('extraction_model', 'sonnet')
+
+        # Log config changes
+        if prev_concurrency is not None and extraction_concurrency != prev_concurrency:
+            log(f"Config changed: extraction_concurrency {prev_concurrency} -> {extraction_concurrency}")
+        if prev_model is not None and extraction_model != prev_model:
+            log(f"Config changed: extraction_model {prev_model} -> {extraction_model}")
+        prev_concurrency = extraction_concurrency
+        prev_model = extraction_model
+
         projects = get_registered_projects()
-        
+
         # Update permissions for all registered projects
         setup_project_permissions(projects)
-        
+
         # Collect pending items from all projects
         all_items = []
         for project in projects:
             if not running:
                 break
-            items = fetch_pending_items(project, EXTRACTION_CONCURRENCY)
+            items = fetch_pending_items(project, extraction_concurrency)
             all_items.extend(items)
-        
-        if not all_items:
+
+        # Check which projects need discovery (limit to 1 per cycle)
+        discovery_project = None
+        for project in projects:
+            if not running:
+                break
+            if check_discovery_needed(project, config):
+                discovery_project = project
+                break  # Only one discovery per cycle
+
+        if not all_items and not discovery_project:
             time.sleep(POLL_INTERVAL)
             continue
-        
-        # Process items concurrently
-        log(f"Processing {len(all_items)} items with concurrency {EXTRACTION_CONCURRENCY}")
-        with ThreadPoolExecutor(max_workers=EXTRACTION_CONCURRENCY) as executor:
-            futures = {executor.submit(process_single_item, item): item for item in all_items}
+
+        # Process extractions and discovery concurrently in shared pool
+        with ThreadPoolExecutor(max_workers=extraction_concurrency) as executor:
+            futures = {}
+
+            # Submit extraction items
+            for item in all_items:
+                futures[executor.submit(process_single_item, item, config)] = ('extraction', item)
+
+            # Submit discovery (uses one worker slot from the pool)
+            if discovery_project:
+                futures[executor.submit(run_project_discovery, discovery_project, config)] = ('discovery', discovery_project)
+
+            if all_items:
+                log(f"Processing {len(all_items)} extractions" +
+                    (f" + 1 discovery" if discovery_project else "") +
+                    f" with concurrency {extraction_concurrency}")
+            elif discovery_project:
+                log(f"Running discovery for {discovery_project}")
+
             for future in as_completed(futures):
                 if not running:
                     break
                 try:
                     future.result()
                 except Exception as e:
-                    log(f"Thread error: {e}")
-        
+                    task_type, task_info = futures[future]
+                    log(f"Thread error ({task_type}): {e}")
+
         time.sleep(RATE_LIMIT)
 
     log("Worker stopped")

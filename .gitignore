@@ -28,7 +28,6 @@ env/
 
 # IDE
 .idea/
-.vscode/
 *.swp
 *.swo
 *~
@@ -36,8 +35,9 @@ env/
 .pydevproject
 .settings/
 
-# Local Claude settings (user-specific)
-.claude/settings.local.json
+.claude/
+.vscode/
+.cursor/
 
 # Runtime data
 *.db
@@ -68,6 +68,8 @@ temp/
 
 # Local cleanup script
 plugins/superwiser/scripts/cleanup.py
+
+
 
 
 

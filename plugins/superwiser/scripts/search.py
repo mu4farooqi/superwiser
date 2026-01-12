@@ -11,8 +11,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from db_utils import load_sqlite_vec, get_model
 from config import (
     DEFAULT_SEARCH_LIMIT, BM25_CANDIDATES,
-    MIN_RAW_BM25, MIN_RAW_COSINE, SEMANTIC_WEIGHT,
-    FIRST_PROMPT_MIN_SCORE
+    MIN_RAW_BM25, MIN_RAW_COSINE, SEMANTIC_WEIGHT
 )
 
 
@@ -201,28 +200,6 @@ def format_results(results: list) -> str:
             lines.append(f"   Context: {r['context']}")
         if r.get('tags'):
             lines.append(f"   Tags: {', '.join(r['tags'])}")
-    return '\n'.join(lines)
-
-
-def format_for_context(results: list) -> str | None:
-    """Format search results for context injection (concise format).
-
-    Filters by FIRST_PROMPT_MIN_SCORE and formats for stdout injection.
-    Returns None if no results pass the threshold.
-    """
-    filtered = [r for r in results if r.get('hybrid_score', 0) >= FIRST_PROMPT_MIN_SCORE]
-    if not filtered:
-        return None
-
-    lines = [f"**Superwiser** ({len(filtered)} relevant preferences loaded)"]
-    for r in filtered:
-        rule = r['rule']
-        context = r.get('context', '')
-        if context:
-            context = context[:77] + "..." if len(context) > 80 else context
-            lines.append(f"- {rule} (Context: {context})")
-        else:
-            lines.append(f"- {rule}")
     return '\n'.join(lines)
 
 

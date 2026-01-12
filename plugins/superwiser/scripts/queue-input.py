@@ -10,44 +10,22 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
-from db_utils import db_context, hook_output
-from config import (
-    CONTEXT_MAX_LINES, is_extraction_prompt, MIN_PROMPT_LENGTH,
-    FIRST_PROMPT_AUTO_LOAD_CONTEXT, FIRST_PROMPT_SEARCH_LIMIT
-)
-from paths import SESSION_MARKERS_DIR
+from db_utils import db_context
+from config import CONTEXT_MAX_LINES, is_extraction_prompt
 from ensure_init import ensure_ready
 from transcript_utils import contains_secrets, filter_transcript_entry, is_system_message
 
 
-def is_first_prompt(session_id: str) -> bool:
-    """Check if this is the first prompt for this session.
+def hook_output(msg: str | None = None) -> None:
+    """Output JSON response for Claude Code hooks.
 
-    Creates a marker file on first call, returns False on subsequent calls.
+    Args:
+        msg: System message (shown in UI)
     """
-    if not session_id:
-        return False
-    marker = SESSION_MARKERS_DIR / f"{session_id}.searched"
-    if marker.exists():
-        return False
-    # Create marker
-    SESSION_MARKERS_DIR.mkdir(parents=True, exist_ok=True)
-    marker.touch()
-    return True
-
-
-def search_for_context(db_path: str, query: str) -> str | None:
-    """Search for relevant rules and format for context injection."""
-    if len(query.strip()) < MIN_PROMPT_LENGTH:
-        return None
-    if not Path(db_path).exists():
-        return None
-    try:
-        from search import search, format_for_context
-        results = search(db_path, query, top_k=FIRST_PROMPT_SEARCH_LIMIT)
-        return format_for_context(results) if results else None
-    except Exception:
-        return None
+    if msg:
+        print(json.dumps({"continue": True, "systemMessage": msg}))
+    else:
+        print(json.dumps({"continue": True}))
 
 
 def read_and_compress_context(transcript_path: str, max_lines: int) -> tuple[bytes | None, int]:
@@ -60,22 +38,22 @@ def read_and_compress_context(transcript_path: str, max_lines: int) -> tuple[byt
             lines = f.readlines()
 
         total_lines = len(lines)
-        
+
         # Take last N lines and filter them
         context_lines = lines[-max_lines:] if len(lines) > max_lines else lines
-        
+
         filtered_entries = []
         seen_texts = set()  # Deduplicate repeated assistant messages
-        
+
         for line in context_lines:
             line = line.strip()
             if not line:
                 continue
-            
+
             try:
                 entry = json.loads(line)
                 filtered = filter_transcript_entry(entry)
-                
+
                 if filtered:
                     # Deduplicate assistant text responses (streaming can cause duplicates)
                     if filtered.get('role') == 'assistant':
@@ -87,14 +65,14 @@ def read_and_compress_context(transcript_path: str, max_lines: int) -> tuple[byt
                                 continue
                             if text_key:
                                 seen_texts.add(text_key)
-                    
+
                     filtered_entries.append(filtered)
             except json.JSONDecodeError:
                 continue
-        
+
         if not filtered_entries:
             return None, 0
-        
+
         # Convert back to compact JSON lines
         context_text = '\n'.join(json.dumps(e, ensure_ascii=False) for e in filtered_entries)
         compressed = gzip.compress(context_text.encode('utf-8'))
@@ -146,11 +124,6 @@ def main() -> None:
         hook_output()
         return
 
-    # First-prompt search: inject relevant preferences into context
-    injected_context = None
-    if FIRST_PROMPT_AUTO_LOAD_CONTEXT and is_first_prompt(session_id):
-        injected_context = search_for_context(db_path, user_prompt)
-
     context_blob, total_lines = read_and_compress_context(transcript_path, CONTEXT_MAX_LINES)
 
     try:
@@ -165,7 +138,7 @@ def main() -> None:
     except Exception:
         pass
 
-    hook_output(additional_context=injected_context)
+    hook_output()
 
 
 if __name__ == '__main__':

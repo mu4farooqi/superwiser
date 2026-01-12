@@ -11,7 +11,7 @@ SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from mcp.server.fastmcp import FastMCP
-from db_utils import db_context
+from db_utils import db_context, get_token_usage_stats
 from paths import SUPERWISER_DIR, VENV_PYTHON, LOCKS_DIR, MARKERS_DIR, SEARCH_MARKER
 
 mcp = FastMCP("superwiser")
@@ -123,6 +123,89 @@ def search_rules(query: str, context: str = "", limit: int = 5, preferences_only
         return format_results(results)
     except Exception as e:
         return f"Error searching rules: {e}"
+
+
+@mcp.tool()
+def load_preferences(task_context: str = "") -> str:
+    """Load coding preferences for the current task.
+
+    WHEN TO USE:
+    - When user says "use Superwiser", "load preferences", or "load my rules"
+    - When starting significant work on a feature
+    - When you need to understand the user's coding conventions
+
+    Retrieves both global preferences (apply everywhere) and contextual
+    preferences (specific to the task at hand).
+
+    Args:
+        task_context: Description of what you're working on (e.g., "building authentication",
+                     "fixing database queries", "adding React components")
+
+    Returns:
+        Formatted list of relevant coding preferences with context.
+    """
+    from config import PREFERENCE_GLOBAL_LIMIT, PREFERENCE_CONTEXTUAL_LIMIT, PREFERENCE_MIN_SCORE
+
+    db_path = get_db_path()
+    if not Path(db_path).exists():
+        return "No preferences recorded yet. Start coding and I'll learn your preferences over time!"
+
+    results = {"global": [], "contextual": []}
+
+    # 1. Get global preferences (most important, ordered by importance_score)
+    try:
+        with db_context(db_path, timeout=5.0) as db:
+            rows = db.execute("""
+                SELECT r.id, r.rule, r.context, r.importance_score
+                FROM rules r
+                ORDER BY COALESCE(r.importance_score, 0) DESC, r.created_at DESC
+                LIMIT ?
+            """, [PREFERENCE_GLOBAL_LIMIT]).fetchall()
+            results["global"] = [
+                {"id": row[0], "rule": row[1], "context": row[2], "importance_score": row[3]}
+                for row in rows
+            ]
+    except Exception:
+        pass
+
+    # 2. Get contextual matches if task provided
+    if task_context and len(task_context.strip()) >= 10:
+        # Lazy install search dependencies
+        ok, err = ensure_search_deps()
+        if ok:
+            try:
+                from search import search
+                contextual = search(db_path, task_context, top_k=PREFERENCE_CONTEXTUAL_LIMIT)
+                # Filter by score threshold and exclude already-included global rules
+                global_ids = {r['id'] for r in results["global"]}
+                results["contextual"] = [
+                    r for r in contextual
+                    if r.get('hybrid_score', 0) >= PREFERENCE_MIN_SCORE
+                    and r['id'] not in global_ids
+                ]
+            except Exception:
+                pass
+
+    return _format_preferences(results)
+
+
+def _format_preferences(results: dict) -> str:
+    """Format preferences for display."""
+    def format_rule(r: dict) -> str:
+        ctx = r.get('context', '')
+        suffix = f" - {ctx[:60]}..." if ctx and len(ctx) > 60 else (f" - {ctx}" if ctx else "")
+        return f"- {r['rule']}{suffix}"
+
+    lines = []
+    if results["global"]:
+        lines.append("## Global Preferences (apply everywhere)")
+        lines.extend(format_rule(r) for r in results["global"])
+
+    if results["contextual"]:
+        lines.append("\n## Contextual Preferences (for this task)")
+        lines.extend(format_rule(r) for r in results["contextual"])
+
+    return "\n".join(lines) if lines else "No preferences found. Start coding and I'll learn your preferences over time!"
 
 
 @mcp.tool()
@@ -283,13 +366,10 @@ def list_rules(limit: int = 10, sort_by: str = "recent", preferences_only: bool 
 
 @mcp.tool()
 def get_stats() -> str:
-    """Get statistics about captured rules and their importance.
-
-    Returns rule counts, search statistics, and the most important rules
-    based on search frequency, duplicate validation, and conflict survival.
+    """Get statistics about captured rules and token usage.
 
     Returns:
-        JSON with rule statistics including most important rules
+        JSON with rule counts, queue status, and token usage statistics
     """
     db_path = get_db_path()
     if not Path(db_path).exists():
@@ -297,53 +377,15 @@ def get_stats() -> str:
 
     try:
         with db_context(db_path, timeout=5.0) as db:
-            # Total counts
+            # Total rules
             total_rules = db.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
-            total_contexts = db.execute("SELECT COUNT(*) FROM context_graph").fetchone()[0]
 
             # Pending conflicts
             pending_conflicts = db.execute(
                 "SELECT COUNT(*) FROM pending_conflicts WHERE shown = FALSE"
             ).fetchone()[0]
 
-            # Usage stats
-            try:
-                total_search_hits = db.execute(
-                    "SELECT SUM(COALESCE(search_hit_count, 0)) FROM rules"
-                ).fetchone()[0] or 0
-            except Exception:
-                total_search_hits = 0
-
-            # Duplicate skip count
-            try:
-                total_duplicate_skips = db.execute(
-                    "SELECT SUM(COALESCE(duplicate_skip_count, 0)) FROM rules"
-                ).fetchone()[0] or 0
-            except Exception:
-                total_duplicate_skips = 0
-
-            # Conflict survivors
-            try:
-                conflict_survivors = db.execute(
-                    "SELECT COUNT(*) FROM rules WHERE survived_conflict = TRUE"
-                ).fetchone()[0]
-            except Exception:
-                conflict_survivors = 0
-
-            # Top 5 most important rules
-            try:
-                top_rules = db.execute("""
-                    SELECT r.context_id, r.rule, COALESCE(r.importance_score, 0) as score,
-                           COALESCE(r.search_hit_count, 0) as hits,
-                           COALESCE(r.duplicate_skip_count, 0) as dups
-                    FROM rules r
-                    ORDER BY score DESC
-                    LIMIT 5
-                """).fetchall()
-            except Exception:
-                top_rules = []
-
-            # Pending work (prompts being analyzed for rules)
+            # Queue status (prompts being analyzed for rules)
             try:
                 pending_analysis = db.execute(
                     "SELECT COUNT(*) FROM queue WHERE status = 'pending'"
@@ -357,26 +399,16 @@ def get_stats() -> str:
             except Exception:
                 pending_analysis = processing_now = failed_analysis = 0
 
+            # Get token usage stats
+            token_usage = get_token_usage_stats(db_path)
+
             return json.dumps({
                 "total_rules": total_rules,
-                "total_contexts": total_contexts,
                 "pending_conflicts": pending_conflicts,
-                "total_search_hits": total_search_hits,
-                "total_duplicate_skips": total_duplicate_skips,
-                "conflict_survivors": conflict_survivors,
                 "pending_analysis": pending_analysis,
                 "processing_now": processing_now,
                 "failed_analysis": failed_analysis,
-                "most_important_rules": [
-                    {
-                        "id": r[0],
-                        "rule": r[1][:100] + "..." if len(r[1]) > 100 else r[1],
-                        "importance_score": round(r[2], 1),
-                        "search_hits": r[3],
-                        "duplicate_skips": r[4]
-                    }
-                    for r in top_rules
-                ]
+                "token_usage": token_usage
             }, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -551,6 +583,110 @@ def seed_from_history(latest_n: int = None, after_date: str = None) -> str:
         return f"Seeding failed: {result['error']}"
 
     return result.get('message', f"Queued {result['queued']} prompts from {result['transcripts']} transcripts")
+
+
+@mcp.tool()
+def get_config() -> str:
+    """View all Superwiser configuration settings.
+
+    Shows current values, defaults, and descriptions for each setting.
+    Use this to understand what can be configured and current values.
+
+    Returns:
+        Formatted list of all settings with their values and descriptions
+    """
+    from config import get_config_with_metadata
+
+    config = get_config_with_metadata()
+
+    lines = ["# Superwiser Configuration\n"]
+
+    for key, info in config.items():
+        # Show current value and whether it differs from default
+        current = info['value']
+        default = info['default']
+        is_default = current == default
+
+        lines.append(f"## {key}")
+        lines.append(f"**Current value:** {current}" + (" (default)" if is_default else ""))
+        lines.append(f"**Description:** {info['description']}")
+
+        if info['type'] == 'enum':
+            lines.append(f"**Options:** {', '.join(info['options'])}")
+        elif info['type'] in ('int', 'float'):
+            lines.append(f"**Range:** {info['min']} - {info['max']}")
+
+        if not is_default:
+            lines.append(f"**Default:** {default}")
+
+        lines.append("")  # blank line between settings
+
+    lines.append("---")
+    lines.append("Use `set_config(key, value)` to change a setting.")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def set_config(key: str, value: str) -> str:
+    """Change a Superwiser configuration setting.
+
+    Changes take effect within a few seconds (worker re-reads config each cycle).
+
+    Args:
+        key: The setting name (e.g., 'extraction_model', 'extraction_concurrency')
+        value: The new value to set
+
+    Examples:
+        set_config("extraction_model", "opus")  # Use opus for better extraction
+        set_config("extraction_concurrency", "4")  # More parallel workers
+        set_config("preference_global_limit", "10")  # Load more global preferences
+
+    Returns:
+        Confirmation message or error
+    """
+    from config import save_config
+
+    success, message = save_config(key, value)
+    if success:
+        return f"{message}\n\nChanges take effect within a few seconds."
+    return f"Error: {message}"
+
+
+@mcp.tool()
+def reset_config(key: str = None) -> str:
+    """Reset configuration settings to defaults.
+
+    Args:
+        key: Specific setting to reset, or None to reset all settings
+
+    Returns:
+        Confirmation message
+    """
+    from config import CONFIGURABLE_SETTINGS, CONFIG_FILE
+
+    if key and key not in CONFIGURABLE_SETTINGS:
+        return f"Unknown setting: '{key}'. Use get_config() to see valid settings."
+
+    if not CONFIG_FILE.exists():
+        return "Already using defaults."
+
+    try:
+        if key:
+            config = json.loads(CONFIG_FILE.read_text())
+            if key not in config:
+                return f"{key} is already using the default."
+            del config[key]
+            if config:
+                CONFIG_FILE.write_text(json.dumps(config, indent=2))
+            else:
+                CONFIG_FILE.unlink()
+            return f"Reset {key} to default: {CONFIGURABLE_SETTINGS[key]['default']}"
+        else:
+            CONFIG_FILE.unlink()
+            return "All settings reset to defaults."
+    except (json.JSONDecodeError, OSError) as e:
+        return f"Error: {e}"
 
 
 if __name__ == "__main__":

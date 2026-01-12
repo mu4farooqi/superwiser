@@ -2,6 +2,45 @@
 
 Superwiser captures your coding preferences and corrections from Claude Code sessions. It stores them in a searchable database that Claude can reference in future sessions.
 
+## Installation
+
+```bash
+/plugin marketplace add mu4farooqi/superwiser
+/plugin install superwiser
+```
+
+Initializes automatically on first session.
+
+## Usage
+
+Use Claude Code normally. Preferences are captured in the background.
+
+**Loading your preferences:**
+
+Say "use Superwiser" or "load my preferences" in your prompt. Claude will load your recorded coding preferences for the current task.
+
+**Automatic features:**
+- Rule extraction from your prompts
+- Conflict detection for contradictory guidance
+- Importance scoring based on usage
+- Project context discovery (auto-generated)
+
+### Slash Commands
+
+| Command | Description |
+|---------|-------------|
+| `/superwiser:search <query> [limit:N] [preferences]` | Search rules |
+| `/superwiser:list [N] [recent\|important\|hits] [preferences]` | List rules |
+| `/superwiser:tags` | Show all tags |
+| `/superwiser:stats` | View statistics and token usage |
+| `/superwiser:config` | View configuration |
+| `/superwiser:set-config <key> <value>` | Change a setting |
+| `/superwiser:seed` | Import from history (interactive) |
+| `/superwiser:delete <id>` | Delete a rule |
+| `/superwiser:record` | Enable recording |
+| `/superwiser:record-stop` | Pause recording |
+| `/superwiser:init` | Manual initialization |
+
 ## Why Superwiser?
 
 AI already knows how to code. It can architect systems, write tests, and follow best practices. The remaining gap is your steering—the corrections and preferences that make the output match what you actually want.
@@ -63,39 +102,6 @@ Superwiser captures what emerges during sessions—contextual corrections with t
 >
 > *"Use the base controller class instead of copying. We have shared middleware for auth and validation that copied endpoints miss."*
 
-## Installation
-
-```bash
-/plugin marketplace add mu4farooqi/superwiser
-/plugin install superwiser
-```
-
-Initializes automatically on first session.
-
-## Usage
-
-Use Claude Code normally. Preferences are captured in the background.
-
-**Automatic features:**
-- Rule extraction from your prompts
-- Conflict detection for contradictory guidance
-- Importance scoring based on usage
-- Claude checks your preferences before making decisions
-
-### Slash Commands
-
-| Command | Description |
-|---------|-------------|
-| `/superwiser:search <query> [#tags] [limit:N]` | Search rules by keyword, filter by tags |
-| `/superwiser:list [N] [recent\|important\|hits]` | List rules with optional limit and sort |
-| `/superwiser:tags` | Show all tags |
-| `/superwiser:stats` | View statistics |
-| `/superwiser:seed` | Import from historical transcripts |
-| `/superwiser:delete <id>` | Delete a rule |
-| `/superwiser:record` | Enable recording |
-| `/superwiser:record-stop` | Pause recording |
-| `/superwiser:init` | Manual initialization |
-
 ## How It Works
 
 ```
@@ -114,29 +120,27 @@ Use Claude Code normally. Preferences are captured in the background.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Conflict Resolution
+**Conflict resolution:** When contradictory rules are detected, you'll be prompted to pick one, merge them, or skip. Your response resolves the conflict automatically.
 
-When contradictory rules are detected:
+**Importance scoring:** Rules are scored based on search hits (40%), duplicate validation (30%), confidence level (10%), conflict survival (10%), and recency (10%). Higher-scored rules are prioritized when loading preferences.
 
-```
-⚠️ CONFLICT [x7k9m2]
+**Project discovery:** The worker periodically explores your codebase to generate a project context document, helping Claude understand your architecture when extracting rules.
 
-1. Use Redux for state management
-2. Use useState for state management
+## Configuration
 
-Pick a number, say 'both', explain when each applies, or 'skip'.
-```
+View settings with `/superwiser:config`. Change with `/superwiser:set-config <key> <value>`.
 
-Your response resolves the conflict automatically.
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `extraction_model` | sonnet | Model for extraction (sonnet/opus/haiku) |
+| `extraction_concurrency` | 2 | Parallel workers (1-10) |
+| `discovery_interval` | 14 | Days between project context refresh |
+| `discovery_model` | sonnet | Model for project discovery |
+| `semantic_weight` | 0.5 | Search balance (0=keyword, 1=semantic) |
+| `preference_global_limit` | 5 | Max global preferences to load |
+| `preference_contextual_limit` | 5 | Max task-specific preferences to load |
 
-### Importance Scoring
-
-Rules are scored based on:
-- Search hits (40%)
-- Duplicate validation (30%)
-- Confidence level (10%)
-- Conflict survival (10%)
-- Recency (10%)
+Settings are stored in `~/.config/superwiser/config.json` and take effect within seconds.
 
 ## Seeding from History
 
@@ -146,7 +150,12 @@ Import preferences from existing Claude Code conversations:
 /superwiser:seed
 ```
 
-Processes historical transcripts for the current project.
+Shows available transcripts and lets you choose:
+- Latest N transcripts
+- All after a specific date
+- All transcripts
+
+Processing happens in the background.
 
 ## Data Storage
 
@@ -154,10 +163,15 @@ Processes historical transcripts for the current project.
 your-project/
 └── .claude/
     └── superwiser/
-        └── context.db
+        ├── context.db          # Personal preferences (add to .gitignore)
+        └── project-context.md  # Auto-generated project context (can be shared)
 ```
 
-All data stays local.
+All data stays local. Add `context.db` to your project's `.gitignore`:
+
+```gitignore
+.claude/superwiser/context.db
+```
 
 ## Requirements
 
