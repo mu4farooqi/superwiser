@@ -23,6 +23,7 @@ from paths import (
     PID_FILE, VERSION_FILE, LOG_FILE,
     REGISTRY, STATE_FILE, MARKERS_DIR, SEARCH_MARKER
 )
+ENSURE_ENV = SCRIPT_DIR / 'ensure-env.sh'
 
 # Packages to install for worker
 # Version pins should match mcp-server.py SEARCH_DEPS for consistency
@@ -90,6 +91,11 @@ def install_dependencies() -> tuple[bool, str | None]:
     2. Created the venv
     3. Installed mcp package
     """
+    try:
+        subprocess.run(["bash", str(ENSURE_ENV)], check=True, timeout=120)
+    except Exception:
+        return False, "**Superwiser**: Failed to prepare environment (uv/venv)."
+
     state = load_state()
 
     if state.get('version') == VERSION and state.get('status') == 'complete':
@@ -168,6 +174,9 @@ def get_worker_version() -> str | None:
 
 def start_worker() -> None:
     """Start worker daemon, killing old one if version changed."""
+    # Clean up any orphan workers from previous installs (missing PID file)
+    kill_orphan_workers()
+
     current_version = get_worker_version()
 
     # Kill old worker if version mismatch
@@ -230,6 +239,26 @@ def init_project_db(cwd: str) -> None:
     except Exception:
         pass
 
+
+def kill_orphan_workers() -> None:
+    """Kill any running worker.py processes that lack our PID file."""
+    if PID_FILE.exists():
+        return  # Regular path handles PID-managed workers
+    try:
+        output = subprocess.check_output(['ps', '-eo', 'pid,args'], text=True, timeout=5)
+        for line in output.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2:
+                continue
+            pid_str, args = parts
+            if 'plugins/superwiser/scripts/worker.py' in args:
+                try:
+                    pid = int(pid_str)
+                    os.kill(pid, 15)
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
 # ============== Main ==============
 

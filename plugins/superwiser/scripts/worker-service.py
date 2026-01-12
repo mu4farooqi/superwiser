@@ -3,6 +3,7 @@
 
 Start functionality is handled by session-init.py.
 """
+import os
 import signal
 import sys
 from pathlib import Path
@@ -10,9 +11,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from ensure_init import is_worker_running
-
-SUPERWISER_DIR = Path.home() / '.superwiser'
-PID_FILE = SUPERWISER_DIR / 'worker.pid'
+from paths import SUPERWISER_DIR, PID_FILE
 
 
 def stop() -> None:

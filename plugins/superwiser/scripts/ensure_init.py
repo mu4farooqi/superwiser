@@ -11,8 +11,8 @@ import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
-SUPERWISER_DIR = Path.home() / '.superwiser'
-PID_FILE = SUPERWISER_DIR / 'worker.pid'
+sys.path.insert(0, str(SCRIPT_DIR))
+from paths import SUPERWISER_DIR, PID_FILE
 
 
 def is_worker_running() -> bool:

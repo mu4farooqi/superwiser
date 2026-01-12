@@ -32,10 +32,8 @@ from config import (
     EXTRACTION_TIMEOUT, EXTRACTION_MAX_TURNS, MIN_PROMPT_LENGTH,
     EXTRACTION_CONCURRENCY, EXTRACTION_MODEL
 )
+from paths import SUPERWISER_DIR, REGISTRY
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-SUPERWISER_DIR = Path.home() / '.superwiser'
-REGISTRY = SUPERWISER_DIR / 'projects.txt'
 
 # Temp directory structure for worker operations
 TEMP_BASE = Path('/tmp/superwiser')
