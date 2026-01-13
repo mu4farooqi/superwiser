@@ -16,14 +16,14 @@ from pathlib import Path
 from config import get_runtime_config
 
 FIRST_PROMPT_MESSAGE = """<superwiser_reminder>
-Call search_rules with 2-3 sentences describing what you're working on.
-This helps find relevant user coding preferences for better decisions.
+You MUST call search_rules with 2-3 sentences describing what you're working on.
+This helps find relevant user coding/design/architecture preferences for better decisions.
 </superwiser_reminder>"""
 
 PERIODIC_MESSAGE = """<superwiser_reminder>
-If you have new context since your last call to search_rules (new feature area,
-different decisions to make), call it again with 2-3 sentences describing your current work.
-Skip if you're still working on the same thing.
+Consider calling search_rules if you're entering a different phase of work
+(error handling, testing, component structure, API design). Describe your current
+focus in 2-3 sentences—different phases may have relevant rules.
 </superwiser_reminder>"""
 
 
