@@ -25,10 +25,10 @@ Search your recorded coding rules and decisions.
 
 ## Instructions
 
-Call the `search_rules` MCP tool from superwiser with the user's query.
+Call the `search_rules` MCP tool from superwiser with the user's search terms.
 
 **Parameters:**
-- `query`: The search query (required). Use a detailed 1-2 sentence query for best results.
+- `context`: What to search for (required). Use a detailed 1-2 sentence description for best results.
 - `limit`: Max results to return (default: 5)
 - `preferences_only`: If True, only return universal rules without context (default: False)
 

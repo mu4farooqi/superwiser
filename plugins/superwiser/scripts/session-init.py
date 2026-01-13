@@ -22,7 +22,12 @@ from paths import (
     PID_FILE, VERSION_FILE, LOG_FILE,
     REGISTRY, STATE_FILE, MARKERS_DIR, SEARCH_MARKER
 )
+from config import CONFIG_DIR
+
 ENSURE_ENV = SCRIPT_DIR / 'ensure-env.sh'
+ONBOARDING_FILE = CONFIG_DIR / 'onboarding.json'
+GITHUB_REPO = "mu4farooqi/superwiser"
+STAR_THRESHOLD = 10
 
 # Packages to install for worker
 # Version pins should match mcp-server.py SEARCH_DEPS for consistency
@@ -32,7 +37,7 @@ PACKAGES = [
     ('sqlite_vec', 'sqlite-vec==0.1.6'),
     ('mcp', 'mcp')
 ]
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 
 # ============== Dependency Installation ==============
@@ -260,6 +265,77 @@ def kill_orphan_workers() -> None:
         pass
 
 
+# ============== Onboarding ==============
+
+def load_onboarding() -> dict:
+    """Load onboarding state from global config."""
+    try:
+        return json.loads(ONBOARDING_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def save_onboarding(state: dict) -> None:
+    """Save onboarding state to global config."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ONBOARDING_FILE.write_text(json.dumps(state, indent=2))
+
+
+def count_rules(cwd: str) -> int:
+    """Count total rules in project database."""
+    if not cwd:
+        return 0
+    db_path = Path(cwd).resolve() / '.claude' / 'superwiser' / 'context.db'
+    if not db_path.exists():
+        return 0
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("SELECT COUNT(*) FROM rules")
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    except Exception:
+        return 0
+
+
+def get_onboarding_message(cwd: str) -> str | None:
+    """Get onboarding message if applicable."""
+    onboarding = load_onboarding()
+
+    # Seed prompt: show for first 5 sessions
+    seed_count = onboarding.get('seed_prompt_count', 0)
+    if seed_count < 5:
+        onboarding['seed_prompt_count'] = seed_count + 1
+        save_onboarding(onboarding)
+        return (
+            "**Tip**: Run `/superwiser:seed` to import preferences from your "
+            "existing Claude Code conversations. This builds your rule library instantly!\n"
+            "(Ignore if you've already seeded.)"
+        )
+
+    # Star prompt: ask every 3rd session after threshold, unless "never"
+    if onboarding.get('star_never_ask'):
+        return None
+
+    rule_count = count_rules(cwd)
+    if rule_count >= STAR_THRESHOLD:
+        session_count = onboarding.get('star_session_count', 0) + 1
+        onboarding['star_session_count'] = session_count
+        save_onboarding(onboarding)
+
+        # Show on 1st, 4th, 7th... sessions (every 3rd)
+        if session_count % 3 == 1:
+            return (
+                f"**Superwiser** has learned {rule_count} of your coding preferences!\n"
+                f"If you find it helpful, run `/superwiser:star` to star us on GitHub.\n"
+                f"Run `/superwiser:star never` to stop these reminders.\n"
+                f"Or visit: https://github.com/{GITHUB_REPO}"
+            )
+
+    return None
+
+
 # ============== Main ==============
 
 def main() -> None:
@@ -279,15 +355,22 @@ def main() -> None:
     register_project(cwd)
     init_project_db(cwd)
 
+    # Build message
+    messages = []
+
     if recording_disabled:
-        msg = "**Superwiser**: Recording paused. Use `/record` to resume."
+        messages.append("**Superwiser**: Recording paused. Use `/record` to resume.")
     elif deps_msg:
-        msg = deps_msg
+        messages.append(deps_msg)
     else:
-        msg = "**Superwiser** active - learning your coding preferences."
+        messages.append("**Superwiser** active - learning your coding preferences.")
 
+    # Check for onboarding messages (seed prompt or star prompt)
+    onboarding_msg = get_onboarding_message(cwd)
+    if onboarding_msg:
+        messages.append(onboarding_msg)
 
-    print(json.dumps({ "systemMessage": msg }))
+    print(json.dumps({"systemMessage": "\n\n".join(messages)}))
 
 
 if __name__ == '__main__':

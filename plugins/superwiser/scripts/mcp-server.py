@@ -68,7 +68,7 @@ def get_db_path() -> str:
 
 
 @mcp.tool()
-def search_rules(query: str, context: str = "", limit: int = 5, preferences_only: bool = False) -> str:
+def search_rules(context: str, limit: int = 5, preferences_only: bool = False) -> str:
     """Search user's recorded rules and coding decisions.
 
     WHEN TO USE:
@@ -85,15 +85,15 @@ def search_rules(query: str, context: str = "", limit: int = 5, preferences_only
     After the user responds to resolve the conflict, you do not need to call any tools to resolve or delete rules. This is handled automatically in the background.
 
     Args:
-        query: What to search for (e.g., 'error handling', 'testing', 'database')
-        context: HIGHLY RECOMMENDED - describe what you're deciding for better results
-                 (e.g., 'Setting up user authentication with JWT')
+        context: Explain in 2-3 sentences what you're currently working on. More context
+                 helps find relevant rules. Include: the feature/task, what decisions
+                 you're making, and any specific technologies involved.
         limit: Maximum number of results to return (default: 5)
         preferences_only: If True, only return universal rules without context (default: False)
 
     Examples:
-        search_rules("database", context="Choosing database for user data")
-        search_rules("error handling", context="Setting up API error responses")
+        search_rules("Building user authentication. Deciding between JWT and session cookies for token storage.")
+        search_rules("Adding error handling to the payment API. Need to decide how to structure error responses and what to log.")
     """
     # Lazy install search dependencies (sentence-transformers, sqlite-vec)
     ok, err = ensure_search_deps()
@@ -108,15 +108,11 @@ def search_rules(query: str, context: str = "", limit: int = 5, preferences_only
     if not Path(db_path).exists():
         return "No rules recorded yet. The user needs to use Claude Code for a while first."
 
-    # Combine query with context for better semantic matching
-    search_query = f"{query} {context}".strip() if context else query
-
     try:
-        # Pass preferences_only to search for filtering during BM25 retrieval
-        results = search(db_path, search_query, limit, preferences_only=preferences_only)
+        results = search(db_path, context, limit, preferences_only=preferences_only)
 
         if not results:
-            msg = f"No rules found matching '{query}'."
+            msg = f"No rules found matching '{context}'."
             if preferences_only:
                 msg += " (preferences only)"
             return msg

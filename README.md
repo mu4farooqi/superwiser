@@ -24,6 +24,7 @@ Say "use Superwiser" or "load my preferences" in your prompt. Claude will load y
 - Conflict detection for contradictory guidance
 - Importance scoring based on usage
 - Project context discovery (auto-generated)
+- Dynamic context reminders (prompts Claude to check preferences)
 
 ### Slash Commands
 
@@ -132,6 +133,8 @@ View settings with `/superwiser:config`. Change with `/superwiser:set-config <ke
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| `dynamic_context_enabled` | true | Periodic reminders to call search_rules |
+| `dynamic_context_interval` | 60 | Seconds between reminders |
 | `extraction_model` | sonnet | Model for extraction (sonnet/opus/haiku) |
 | `extraction_concurrency` | 2 | Parallel workers (1-10) |
 | `discovery_interval` | 14 | Days between project context refresh |

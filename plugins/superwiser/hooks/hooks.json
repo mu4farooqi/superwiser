@@ -12,10 +12,27 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/hook-runner.sh\" dynamic-context.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "matcher": "*",
         "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/hook-runner.sh\" dynamic-context.py",
+            "timeout": 5
+          },
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/hook-runner.sh\" queue-input.py",

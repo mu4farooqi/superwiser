@@ -417,6 +417,18 @@ CONFIGURABLE_SETTINGS = {
         'type': 'enum',
         'options': ['sonnet', 'opus', 'haiku'],
         'description': 'Model for project discovery (sonnet=balanced exploration)'
+    },
+    'dynamic_context_enabled': {
+        'default': True,
+        'type': 'bool',
+        'description': 'Enable periodic reminders to check user preferences via search_rules'
+    },
+    'dynamic_context_interval': {
+        'default': 60,
+        'type': 'int',
+        'min': 30,
+        'max': 900,
+        'description': 'Seconds between preference check reminders (60 = 1 minute)'
     }
 }
 
@@ -461,6 +473,15 @@ def validate_config_value(key: str, value) -> tuple[bool, str]:
         except (ValueError, TypeError):
             return False, f"Value for {key} must be {'an integer' if meta['type'] == 'int' else 'a number'}"
 
+    elif meta['type'] == 'bool':
+        if isinstance(value, bool):
+            pass  # Already valid
+        elif isinstance(value, str):
+            if value.lower() not in ('true', '1', 'yes', 'on', 'false', '0', 'no', 'off'):
+                return False, f"Value for {key} must be true or false"
+        else:
+            return False, f"Value for {key} must be true or false"
+
     return True, ""
 
 
@@ -480,6 +501,9 @@ def save_config(key: str, value) -> tuple[bool, str]:
         value = int(value)
     elif meta['type'] == 'float':
         value = float(value)
+    elif meta['type'] == 'bool':
+        if isinstance(value, str):
+            value = value.lower() in ('true', '1', 'yes', 'on')
 
     # Load existing config
     config = {}
