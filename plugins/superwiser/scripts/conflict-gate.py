@@ -11,6 +11,7 @@ SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from conflicts import check_pending_conflicts
 from ensure_init import ensure_ready
+from paths import get_project_root
 
 
 def main() -> None:
@@ -19,7 +20,7 @@ def main() -> None:
     except Exception:
         sys.exit(0)  # Allow on error
 
-    cwd = data.get('cwd', '.')
+    hook_cwd = data.get('cwd', '.')
     tool_name = data.get('tool_name', '')
 
     # Don't block MCP tools (they might be superwiser commands to resolve conflicts)
@@ -29,6 +30,9 @@ def main() -> None:
     # Don't block Read - user might need context
     if tool_name == 'Read':
         sys.exit(0)
+
+    # Use project root (handles subtasks that cd into subdirectories)
+    cwd = get_project_root(hook_cwd)
 
     if not ensure_ready(cwd):
         sys.exit(0)

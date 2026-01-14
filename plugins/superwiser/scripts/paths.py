@@ -3,7 +3,23 @@
 All components should import from here to ensure consistency.
 """
 
+import os
 from pathlib import Path
+
+
+def get_project_root(fallback: str = "") -> str:
+    """Get the project root directory.
+    
+    Uses CLAUDE_PROJECT_DIR (provided by Claude Code) to always get the original
+    project root, even when subtasks cd into subdirectories.
+    
+    Args:
+        fallback: Value to use if CLAUDE_PROJECT_DIR is not set (e.g., cwd from hook input)
+    
+    Returns:
+        Project root path as string
+    """
+    return os.environ.get('CLAUDE_PROJECT_DIR') or fallback or os.getcwd()
 
 # Global superwiser directory
 SUPERWISER_DIR = Path.home() / ".superwiser"

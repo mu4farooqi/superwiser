@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Inject context reminders to call search_rules.
+Inject context reminders to load preferences or search rules.
 
 Runs on both PostToolUse and UserPromptSubmit hooks.
-Fires reminder on first prompt, then after configured interval.
+- First prompt: Remind to call load_preferences (gets global + contextual)
+- Subsequent reminders: Remind to call search_rules (for new work phases)
 """
 
 import json
@@ -14,9 +15,10 @@ import time
 from pathlib import Path
 
 from config import get_runtime_config
+from paths import get_project_root
 
 FIRST_PROMPT_MESSAGE = """<superwiser_reminder>
-You MUST call search_rules with 2-3 sentences describing what you're working on.
+You MUST call load_preferences with 2-3 sentences describing what you're working on.
 This helps find relevant user coding/design/architecture preferences for better decisions.
 </superwiser_reminder>"""
 
@@ -70,8 +72,7 @@ def main():
         return  # No session ID, can't track state
 
     # Per-session state file for isolation
-    cwd = os.environ.get('PWD', os.getcwd())
-    state_dir = Path(cwd) / '.claude' / 'superwiser' / 'sessions'
+    state_dir = Path(get_project_root()) / '.claude' / 'superwiser' / 'sessions'
     state_file = state_dir / f'{session_id}.json'
 
     # Load state for THIS session

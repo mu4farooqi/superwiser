@@ -12,7 +12,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from mcp.server.fastmcp import FastMCP
 from db_utils import db_context, get_token_usage_stats
-from paths import SUPERWISER_DIR, VENV_PYTHON, LOCKS_DIR, MARKERS_DIR, SEARCH_MARKER
+from paths import SUPERWISER_DIR, VENV_PYTHON, LOCKS_DIR, MARKERS_DIR, SEARCH_MARKER, get_project_root
 
 mcp = FastMCP("superwiser")
 
@@ -63,37 +63,18 @@ def ensure_search_deps() -> tuple[bool, str]:
 
 
 def get_db_path() -> str:
-    """Get database path from env var or current working directory."""
-    return os.environ.get('SUPERWISER_DB_PATH') or str(Path.cwd() / '.claude' / 'superwiser' / 'context.db')
+    """Get database path from env var or project root directory."""
+    return os.environ.get('SUPERWISER_DB_PATH') or str(Path(get_project_root()) / '.claude' / 'superwiser' / 'context.db')
 
 
 @mcp.tool()
 def search_rules(context: str, limit: int = 5, preferences_only: bool = False) -> str:
-    """Search user's recorded rules and coding decisions.
-
-    WHEN TO USE:
-    - Before important decisions (architecture, libraries, patterns, tech choices)
-    - When unsure about coding style, conventions, or approaches
-    - When you need more specific preferences beyond what was auto-loaded
-
-    Note: Relevant preferences are automatically loaded on the first prompt of each session.
-    Use this tool for deeper searches or when making specific decisions mid-session.
-
-    CONFLICT HANDLING:
-    If results show "\u26a0\ufe0f CONFLICT [id]", you must ask user which rule to follow before proceeding.
-    Format your question as: "SuperWiser (Conflict) [id]: <describe the conflicting rules and ask which to follow>"
-    After the user responds to resolve the conflict, you do not need to call any tools to resolve or delete rules. This is handled automatically in the background.
+    """Search for rules relevant to your current work.
 
     Args:
-        context: Explain in 2-3 sentences what you're currently working on. More context
-                 helps find relevant rules. Include: the feature/task, what decisions
-                 you're making, and any specific technologies involved.
-        limit: Maximum number of results to return (default: 5)
-        preferences_only: If True, only return universal rules without context (default: False)
-
-    Examples:
-        search_rules("Building user authentication. Deciding between JWT and session cookies for token storage.")
-        search_rules("Adding error handling to the payment API. Need to decide how to structure error responses and what to log.")
+        context: 2-3 sentences describing what you're working on and what decisions you're making.
+        limit: Maximum results (default: 5)
+        preferences_only: Only return universal rules without context (default: False)
     """
     # Lazy install search dependencies (sentence-transformers, sqlite-vec)
     ok, err = ensure_search_deps()
@@ -123,22 +104,13 @@ def search_rules(context: str, limit: int = 5, preferences_only: bool = False) -
 
 @mcp.tool()
 def load_preferences(task_context: str = "") -> str:
-    """Load coding preferences for the current task.
+    """Load user's coding preferences at the start of a task.
 
-    WHEN TO USE:
-    - When user says "use Superwiser", "load preferences", or "load my rules"
-    - When starting significant work on a feature
-    - When you need to understand the user's coding conventions
-
-    Retrieves both global preferences (apply everywhere) and contextual
-    preferences (specific to the task at hand).
+    Returns global preferences (apply everywhere) and contextual preferences
+    (matching the task). Best used at session start or when beginning new work.
 
     Args:
-        task_context: Description of what you're working on (e.g., "building authentication",
-                     "fixing database queries", "adding React components")
-
-    Returns:
-        Formatted list of relevant coding preferences with context.
+        task_context: Brief description of what you're working on.
     """
     from config import PREFERENCE_GLOBAL_LIMIT, PREFERENCE_CONTEXTUAL_LIMIT, PREFERENCE_MIN_SCORE
 
@@ -250,7 +222,7 @@ def initialize() -> str:
     Returns:
         Status message
     """
-    cwd = os.getcwd()
+    cwd = get_project_root()
 
     try:
         input_data = json.dumps({"cwd": cwd})
@@ -282,38 +254,12 @@ def initialize() -> str:
 
 @mcp.tool()
 def list_rules(limit: int = 10, sort_by: str = "recent", preferences_only: bool = False) -> str:
-    """List captured rules with total count.
-
-    WHEN TO USE:
-    - When user explicitly asks to see their rules
-    - When browsing rules by importance or recency
-    - Use preferences_only=True to see only universal rules (no context)
-
-    Note: Relevant preferences are automatically loaded on first prompt.
-    This tool is for explicit browsing, not routine session initialization.
-
-    SORT OPTIONS:
-    - "recent": Newest rules first (default)
-    - "hits": Most searched rules first (raw search hit count)
-    - "important": Composite score combining:
-        * Search hits (40%): How often this rule appears in searches
-        * Duplicate validation (30%): Prompts skipped as duplicates of this rule
-        * Confidence (10%): strong > normal > weak > tentative
-        * Conflict survival (10%): User explicitly chose this rule over alternatives
-        * Recency (10%): Recently used rules score higher
-
-    CONFLICT HANDLING:
-    If results show "CONFLICT [id]", you must ask user which rule to follow before proceeding.
-    Format your question as: "SuperWiser (Conflict) [id]: <describe the conflicting rules and ask which to follow>"
-    After the user responds, conflict resolution is handled automatically in the background.
+    """List all captured rules. Use when user asks to see/browse their rules.
 
     Args:
-        limit: Maximum number of rules to show (default: 10)
-        sort_by: Sort order - "recent" (default), "important", or "hits"
-        preferences_only: If True, only show universal rules without context (default: False)
-
-    Returns:
-        JSON with rules, total count, and importance info
+        limit: Maximum rules to show (default: 10)
+        sort_by: "recent" (default), "important", or "hits"
+        preferences_only: Only show universal rules without context (default: False)
     """
     db_path = get_db_path()
     if not Path(db_path).exists():
@@ -490,7 +436,7 @@ def enable_recording() -> str:
     """
     from ensure_init import set_recording_state, run_init
 
-    cwd = os.getcwd()
+    cwd = get_project_root()
     set_recording_state(cwd, enabled=True)
 
     # Ensure worker is running
@@ -511,7 +457,7 @@ def disable_recording() -> str:
     """
     from ensure_init import set_recording_state
 
-    cwd = os.getcwd()
+    cwd = get_project_root()
     set_recording_state(cwd, enabled=False)
 
     return "Recording disabled. This setting persists across sessions. Use enable_recording to resume."
@@ -531,7 +477,7 @@ def seed_preview() -> str:
     """
     from seed import get_transcript_stats
 
-    cwd = os.getcwd()
+    cwd = get_project_root()
     stats = get_transcript_stats(cwd)
 
     if stats['count'] == 0:
@@ -567,7 +513,7 @@ def seed_from_history(latest_n: int = None, after_date: str = None) -> str:
     """
     from seed import seed_project
 
-    cwd = os.getcwd()
+    cwd = get_project_root()
     db_path = str(Path(cwd) / '.claude' / 'superwiser' / 'context.db')
 
     if not Path(db_path).exists():

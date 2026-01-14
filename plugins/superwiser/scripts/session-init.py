@@ -20,7 +20,8 @@ from ensure_init import is_recording_disabled, is_worker_running
 from paths import (
     SUPERWISER_DIR, VENV_DIR, VENV_PYTHON,
     PID_FILE, VERSION_FILE, LOG_FILE,
-    REGISTRY, STATE_FILE, MARKERS_DIR, SEARCH_MARKER
+    REGISTRY, STATE_FILE, MARKERS_DIR, SEARCH_MARKER,
+    get_project_root
 )
 from config import CONFIG_DIR
 
@@ -344,7 +345,8 @@ def main() -> None:
     except Exception:
         data = {}
 
-    cwd = data.get('cwd', '')
+    # Use project root (handles subtasks that cd into subdirectories)
+    cwd = get_project_root(data.get('cwd', ''))
     recording_disabled = is_recording_disabled(cwd)
 
     deps_ok, deps_msg = install_dependencies()

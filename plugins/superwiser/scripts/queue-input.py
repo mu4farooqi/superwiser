@@ -13,6 +13,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from db_utils import db_context
 from config import CONTEXT_MAX_LINES, is_extraction_prompt
 from ensure_init import ensure_ready
+from paths import get_project_root
 from transcript_utils import contains_secrets, filter_transcript_entry, is_system_message
 
 
@@ -91,13 +92,17 @@ def main() -> None:
 
     user_prompt = data.get('prompt', '') or data.get('user_prompt', '')
     session_id = data.get('session_id', '')
-    cwd = data.get('cwd', '.')
+    hook_cwd = data.get('cwd', '.')
     transcript_path = data.get('transcript_path', '')
 
     # Skip extraction sessions running in /tmp/superwiser (prevents infinite recursion)
-    if cwd.startswith('/tmp/superwiser'):
+    # Check both hook_cwd and CLAUDE_PROJECT_DIR for safety
+    if hook_cwd.startswith('/tmp/superwiser'):
         hook_output()
         return
+
+    # Use project root (handles subtasks that cd into subdirectories)
+    cwd = get_project_root(hook_cwd)
     # Fallback: also check prompt content in case cwd check fails
     if is_extraction_prompt(user_prompt):
         hook_output()
