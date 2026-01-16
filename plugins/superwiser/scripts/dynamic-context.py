@@ -9,6 +9,7 @@ Runs on both PostToolUse and UserPromptSubmit hooks.
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -16,6 +17,8 @@ from pathlib import Path
 
 from config import get_runtime_config
 from paths import get_project_root
+
+MIN_RULES_FOR_REMINDERS = 10
 
 FIRST_PROMPT_MESSAGE = """<superwiser_reminder>
 You MUST call load_preferences with 2-3 sentences describing what you're working on.
@@ -27,6 +30,21 @@ Consider calling search_rules if you're entering a different phase of work
 (error handling, testing, component structure, API design). Describe your current
 focus in 2-3 sentences—different phases may have relevant rules.
 </superwiser_reminder>"""
+
+
+def count_rules() -> int:
+    """Count total rules in project database."""
+    db_path = Path(get_project_root()) / '.claude' / 'superwiser' / 'context.db'
+    if not db_path.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.execute("SELECT COUNT(*) FROM rules")
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    except Exception:
+        return 0
 
 
 def read_stdin():
@@ -64,6 +82,10 @@ def main():
 
     config = get_runtime_config()
     if not config.get('dynamic_context_enabled', True):
+        return
+
+    # Only send reminders if there are enough rules to make search worthwhile
+    if count_rules() < MIN_RULES_FOR_REMINDERS:
         return
 
     # Get current session ID (field is 'session_id' per hooks spec)

@@ -38,7 +38,7 @@ PACKAGES = [
     ('sqlite_vec', 'sqlite-vec==0.1.6'),
     ('mcp', 'mcp')
 ]
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 
 
 # ============== Dependency Installation ==============
